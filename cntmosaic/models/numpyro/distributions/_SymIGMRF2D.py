@@ -8,7 +8,7 @@ from scipy.special import factorial
 
 import jax
 import jax.numpy as jnp
-from jax import lax, Array
+from jax import lax
 from jax.typing import ArrayLike
 
 from numpyro.distributions import constraints
@@ -261,6 +261,12 @@ class SymIGMRF2D(Distribution):
     tol : float, default=1e-10
         Tolerance for filtering near-zero eigenvalues. Eigenvalues below this
         threshold are excluded from sampling and likelihood computations.
+    rescale_marginal_variance : bool, default=False
+        If True, rescale `L` (and its eigenvalues) so that the geometric mean
+        of the diagonal of `L`'s generalized inverse
+        `Sigma = U_sub @ diag(1 / lam_sub) @ U_sub.T` (the marginal variances
+        at `cond_prec=1`) equals 1, following Sørbye & Rue (2014). This makes
+        `cond_prec` comparable across different `num_nodes`/`order` choices.
     validate_args : bool, optional
         Whether to validate input arguments. Default is None.
 
@@ -338,8 +344,15 @@ class SymIGMRF2D(Distribution):
       Chapman & Hall/CRC. Chapter 3: Intrinsic GMRFs.
     - Prem, K., et al. (2017). Projecting social contact matrices in 152 countries using
       contact surveys and demographic data. PLOS Computational Biology, 13(9).
+    - Sørbye, S. H., & Rue, H. (2014). Scaling intrinsic Gaussian Markov random field
+      priors in spatial modelling. Spatial Statistics, 8, 39-51.
     """
 
+    arg_constraints = {
+        "num_nodes": constraints.positive_integer,
+        "order": constraints.positive_integer,
+        "cond_prec": constraints.positive,
+    }
     support = constraints.real_vector
     reparametrized_params = ["loc", "cond_prec"]
     pytree_data_fields = ("loc", "cond_prec", "lam_sub", "U_sub", "L")
@@ -350,8 +363,9 @@ class SymIGMRF2D(Distribution):
         num_nodes: int,
         order: int,
         loc: ArrayLike = 0.0,
-        cond_prec: Array = 1.0,
+        cond_prec: ArrayLike = 1.0,
         tol: float = 1e-10,
+        rescale_marginal_variance: bool = False,
         *,
         validate_args: Optional[bool] = None,
     ):
@@ -388,6 +402,12 @@ class SymIGMRF2D(Distribution):
             Tolerance for eigenvalue filtering. Eigenvalues smaller than this are
             treated as zero and excluded from computations. This handles the
             intrinsic (improper) nature of the IGMRF.
+        rescale_marginal_variance : bool, default=False
+            If True, rescale `L` (and its eigenvalues) so that the geometric mean
+            of the diagonal of `L`'s generalized inverse
+            `Sigma = U_sub @ diag(1 / lam_sub) @ U_sub.T` (the marginal variances
+            at `cond_prec=1`) equals 1, following Sørbye & Rue (2014). This makes
+            `cond_prec` comparable across different `num_nodes`/`order` choices.
         validate_args : bool, optional
             Whether to enable input validation. Default is None.
 
@@ -404,8 +424,9 @@ class SymIGMRF2D(Distribution):
         2. **Apply triangular indexing** to respect symmetry constraints
         3. **Construct Laplacian** L = D₁ᵀD₁ + D₂ᵀD₂ on triangular domain
         4. **Eigendecomposition** to identify and remove zero eigenvalues
-        5. **Setup index mappings** between full and triangular representations
-        6. **Broadcast parameters** to handle batched computations
+        5. **Optionally rescale** L and its eigenvalues (see `rescale_marginal_variance`)
+        6. **Setup index mappings** between full and triangular representations
+        7. **Broadcast parameters** to handle batched computations
 
         The use of NumPy (rather than JAX) for matrix construction avoids
         JAX tracing overhead during initialization.
@@ -432,12 +453,27 @@ class SymIGMRF2D(Distribution):
         # Eigendecomposition on NumPy array (before JAX conversion) to avoid
         # TracerArrayConversionError when called inside JIT-compiled SVI body.
         lam, U = np.linalg.eigh(L_np)
-        self.L = jnp.asarray(L_np)
 
         # Boolean filtering in Numpy (not traced by JAX)
         nonzero_mask = lam > tol
-        self.lam_sub = lam[nonzero_mask]
-        self.U_sub = U[:, nonzero_mask]
+        lam_sub_raw = lam[nonzero_mask]
+        U_sub = U[:, nonzero_mask]
+
+        if rescale_marginal_variance:
+            # Sørbye & Rue (2014): rescale L so the geometric mean of the diagonal
+            # of its generalized inverse Sigma = U_sub @ diag(1/lam_sub) @ U_sub.T
+            # (the marginal variances at cond_prec=1) is 1, making cond_prec
+            # comparable across different num_nodes/order choices. diag(Sigma)_k =
+            # sum_j U_sub[k,j]^2 / lam_sub[j], computed directly rather than
+            # forming the full triangular-domain matrix.
+            marginal_var = np.sum((U_sub**2) / lam_sub_raw, axis=1)
+            scale = np.exp(np.mean(np.log(marginal_var)))
+        else:
+            scale = 1.0
+
+        self.lam_sub = scale * lam_sub_raw
+        self.U_sub = U_sub
+        self.L = jnp.asarray(scale * L_np)
 
         self.sym_ix = symm_from_tril_ix_col(self.num_nodes)
         self.tril_ix = tril_ix_col(self.num_nodes)
@@ -484,7 +520,7 @@ class SymIGMRF2D(Distribution):
             validate_args=validate_args,
         )
 
-    def sample(self, key: jax.dtypes.prng_key, sample_shape: tuple[int, ...] = ()) -> jax.Array:
+    def sample(self, key: jax.Array, sample_shape: tuple[int, ...] = ()) -> jax.Array:
         """
         Sample from the symmetric IGMRF2D distribution.
 
@@ -500,7 +536,7 @@ class SymIGMRF2D(Distribution):
 
         Parameters
         ----------
-        key : jax.dtypes.prng_key
+        key : jax.Array
             PRNG key for random number generation.
         sample_shape : tuple[int, ...], default=()
             Shape of the sample batch to generate.
@@ -599,6 +635,7 @@ class SymIGMRF2D(Distribution):
         loc=(),
         cond_prec=(),
         tol=(),
+        rescale_marginal_variance=(),
     ) -> None:
         """
         Infer batch and event shapes from parameter shapes.
