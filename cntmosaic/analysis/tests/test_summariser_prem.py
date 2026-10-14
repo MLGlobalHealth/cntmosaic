@@ -17,7 +17,7 @@ import pandas as pd
 import pytest
 from jax.random import PRNGKey
 
-from cntmosaic.analysis import ModelSummariserPrem
+from cntmosaic.analysis import ContactSummary, ModelSummariserPrem
 from cntmosaic.dataloader.containers import PopulationData
 from cntmosaic.datasets import load_age_distribution
 from cntmosaic.models import Prem
@@ -404,7 +404,7 @@ class TestSummariseCintOutputFormat:
     """Test output format matches BRC models."""
 
     def test_output_format_k1(self, mock_prem_unstratified, pop_data_unstratified):
-        """Test K=1 returns NDArray of shape (3, A, A)."""
+        """Test K=1 returns a ContactSummary with (A, A) bounds."""
         summariser = ModelSummariserPrem(
             mock_prem_unstratified, pop_data=pop_data_unstratified
         )
@@ -414,13 +414,20 @@ class TestSummariseCintOutputFormat:
         # Always returns Dict keyed by strata label
         assert isinstance(summary, dict)
         assert "All->All" in summary
-        # Shape of each entry should be (3, A, A) where A is age groups (5)
-        assert summary["All->All"].shape == (3, 5, 5)
-        # Order: [lower, median, upper]
-        assert summary["All->All"][0, 0, 0] <= summary["All->All"][1, 0, 0] <= summary["All->All"][2, 0, 0]
+        cs = summary["All->All"]
+        assert isinstance(cs, ContactSummary)
+        # Each bound should be (A, A) where A is age groups (5)
+        assert cs.lower.shape == (5, 5)
+        assert cs.central.shape == (5, 5)
+        assert cs.upper.shape == (5, 5)
+        assert cs.to_array().shape == (3, 5, 5)
+        assert cs.alpha == 0.05
+        # Order: lower <= median <= upper
+        assert np.all(cs.lower <= cs.central)
+        assert np.all(cs.central <= cs.upper)
 
     def test_output_format_k_gt_1(self, mock_prem_stratified_full, pop_data_stratified):
-        """Test K>1 returns Dict[str, NDArray]."""
+        """Test K>1 returns Dict[str, ContactSummary]."""
         summariser = ModelSummariserPrem(
             mock_prem_stratified_full, pop_data=pop_data_stratified
         )
@@ -433,12 +440,15 @@ class TestSummariseCintOutputFormat:
         assert "M->M" in summary
         assert "M->F" in summary
 
-        # Each value should be (3, A, A)
-        for label, quantiles in summary.items():
-            assert quantiles.shape == (3, 5, 5)
+        # Each value should be a ContactSummary with (A, A) bounds
+        for label, cs in summary.items():
+            assert isinstance(cs, ContactSummary)
+            assert cs.lower.shape == (5, 5)
+            assert cs.central.shape == (5, 5)
+            assert cs.upper.shape == (5, 5)
             # Check ordering
-            assert np.all(quantiles[0] <= quantiles[1])
-            assert np.all(quantiles[1] <= quantiles[2])
+            assert np.all(cs.lower <= cs.central)
+            assert np.all(cs.central <= cs.upper)
 
     def test_summarise_cint_k1_returns_dict(
         self, mock_prem_unstratified, pop_data_unstratified
@@ -572,7 +582,11 @@ class TestEdgeCases:
         summary2 = summariser.summarise_cint(alpha=0.05, force_recompute=True)
 
         # Shapes should match but values might differ slightly due to recomputation
-        assert summary1["All->All"].shape == summary2["All->All"].shape
+        cs1, cs2 = summary1["All->All"], summary2["All->All"]
+        assert isinstance(cs2, ContactSummary)
+        assert cs1.lower.shape == cs2.lower.shape
+        assert cs1.central.shape == cs2.central.shape
+        assert cs1.upper.shape == cs2.upper.shape
 
 
 # ============================================================================
