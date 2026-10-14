@@ -15,8 +15,6 @@ Predictor
 Utility Functions
 -----------------
 
-.. autofunction:: cntmosaic.predict.predict_full_matrices
-
 .. autofunction:: cntmosaic.predict.feasible_mixing_bounds
 
 .. autofunction:: cntmosaic.predict.spectral_radius
