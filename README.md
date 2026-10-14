@@ -74,9 +74,11 @@ All notebooks are located in the [`tutorials/`](tutorials/) directory.
 
 | Notebook | Description |
 |---|---|
+| [00 — Quickstart](tutorials/00_Quickstart.ipynb) | Walk through a complete workflow on the bundled POLYMOD Germany dataset: load survey data, fit a Bayesian contact model with SVI, and visualise the posterior contact intensity matrix. |
 | [01 — Generalized Contact Matrices](tutorials/01_Tutorial_GenMix.ipynb) | Fit generalized contact matrices stratified by age and gender using POLYMOD data, covering both complete and partial observation scenarios. |
 | [02 — SocialMix](tutorials/02_Tutorial_SocialMix.ipynb) | Estimate age-stratified social contact matrices from survey data using the SocialMix model with bootstrap inference. |
-| [03 — Feature Selection](tutorials/03_Tutorial_Feature_Selection.ipynb) | Select the most parsimonious set of demographic stratification variables for contact models using LOO-CV ELPD. |
+| [03 — Context-Specific Contact Matrices](tutorials/03_Tutorial_Prem_Context.ipynb) | Estimate household, school, work, and other contact matrices for the United States from the Epistorm-Mix survey using the `Prem2` model. |
+| [04 — Feature Selection](tutorials/04_Tutorial_Feature_Selection.ipynb) | Select the most parsimonious set of demographic stratification variables for contact models using LOO-CV ELPD. |
 
 ---
 
