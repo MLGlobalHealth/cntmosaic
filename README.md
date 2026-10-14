@@ -1,6 +1,6 @@
 [![CI](https://github.com/ShozenD/cntmosaic/workflows/CI/badge.svg)](https://github.com/ShozenD/cntmosaic/actions)
 [![codecov](https://codecov.io/gh/ShozenD/cntmosaic/graph/badge.svg?token=9U271V3D3H)](https://codecov.io/gh/ShozenD/cntmosaic)
-[![Documentation](https://readthedocs.org/projects/cntmosaic/badge/?version=latest)](https://cntmosaic.readthedocs.io/en/latest/)
+[![Documentation](https://readthedocs.org/projects/cntmosaic-docs/badge/?version=latest)](https://cntmosaic-docs.readthedocs.io/en/latest/)
 [![License: BSD 3-Clause](https://img.shields.io/badge/License-BSD%203--Clause-blue.svg)](LICENSE)
 
 # Contact Mosaic
