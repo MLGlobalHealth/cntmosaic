@@ -181,7 +181,11 @@ def rtruncated_beta(
     Generate random samples from a truncated Beta distribution.
 
     Samples are drawn via inverse CDF transform: a uniform variate is
-    mapped through the Beta CDF restricted to ``[lb, ub]``.
+    mapped through the Beta CDF restricted to ``[lb, ub]``.  Intervals in the
+    upper tail (``CDF(lb) > 0.5``) are inverted through the survival function
+    instead, for precision.  If the interval holds numerically zero
+    probability mass, the bound nearest the Beta mean is returned, which is
+    the limit of the truncated distribution.
 
     Parameters
     ----------
@@ -213,11 +217,26 @@ def rtruncated_beta(
         np.asarray(ub, dtype=float),
     )
 
+    U = rng.uniform(size=a.shape)
     Flb = beta.cdf(lb, a, b)
-    Fub = beta.cdf(ub, a, b)
-    u = Flb + (Fub - Flb) * rng.uniform(size=a.shape)
+    upper = Flb > 0.5  # interval in the upper tail: invert via the survival function
+    x = np.empty_like(a)
 
-    return beta.ppf(u, a, b)
+    lo = ~upper
+    Fub = beta.cdf(ub[lo], a[lo], b[lo])
+    mass_lo = Fub - Flb[lo]
+    x[lo] = beta.ppf(Flb[lo] + mass_lo * U[lo], a[lo], b[lo])
+
+    Slb = beta.sf(lb[upper], a[upper], b[upper])
+    Sub = beta.sf(ub[upper], a[upper], b[upper])
+    mass_up = Slb - Sub
+    x[upper] = beta.isf(Sub + mass_up * U[upper], a[upper], b[upper])
+
+    mass = np.empty_like(a)
+    mass[lo], mass[upper] = mass_lo, mass_up
+    x = np.where(mass > 0, x, a / (a + b))
+
+    return np.clip(x, lb, ub)
 
 
 def rtruncated_dirichlet(
@@ -225,14 +244,24 @@ def rtruncated_dirichlet(
     lb: ArrayLike = 0.0,
     ub: ArrayLike = 1.0,
     rng: np.random.Generator | None = None,
+    n_sweeps: int = 20,
 ) -> np.ndarray:
     """
     Generate random samples from a truncated Dirichlet distribution.
 
-    Samples are drawn via a sequential conditional stick-breaking procedure.
-    Each component is sampled from a truncated Beta distribution conditioned
-    on previous components, with bounds adjusted to satisfy the element-wise
-    constraints ``lb <= x <= ub`` and the simplex constraint ``sum(x) = 1``.
+    Draws ``x ~ Dirichlet(concentration)`` restricted to the box
+    ``lb <= x <= ub`` on the simplex ``sum(x) = 1``.
+
+    For ``K = 2`` the draw is exact: ``x_0`` follows a truncated Beta on the
+    interval implied by both components' bounds.  For ``K >= 3`` a
+    pairwise-coordinate Gibbs sampler is used.  Starting from a feasible
+    point, each sweep visits pairs ``(i, j)`` in random order, holds
+    ``c = x_i + x_j`` fixed and redraws ``x_i / c`` from its exact
+    conditional, a Beta(``alpha_i``, ``alpha_j``) truncated so both
+    components stay within their bounds.  The chain leaves the truncated
+    Dirichlet invariant, so draws are exact in the limit of many sweeps.
+    Each element of the batch runs its own chain, so draws are mutually
+    independent.
 
     Parameters
     ----------
@@ -248,6 +277,10 @@ def rtruncated_dirichlet(
     rng : numpy.random.Generator or None, optional
         Random number generator instance.  If ``None`` (default), a new
         generator is created via ``np.random.default_rng()``.
+    n_sweeps : int, optional
+        Number of Gibbs sweeps for ``K >= 3`` (default 20).  Each sweep makes
+        K truncated Beta draws per batch element, so the cost grows as
+        ``n_sweeps * K``.  Ignored for ``K <= 2``.
 
     Returns
     -------
@@ -255,6 +288,12 @@ def rtruncated_dirichlet(
         Random samples on the simplex with shape determined by broadcasting
         ``concentration``, ``lb``, and ``ub`` together.  The last axis has
         size K and sums to 1.
+
+    Raises
+    ------
+    ValueError
+        If the bounds are infeasible: ``lb > ub``, bounds outside
+        ``[0, 1]``, ``sum(lb) > 1`` or ``sum(ub) < 1``.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -269,39 +308,57 @@ def rtruncated_dirichlet(
     if K == 1:
         return np.clip(np.ones_like(concentration), lb, ub)
 
-    x = np.zeros_like(concentration)
-
-    # Sample component K-2 first (marginal truncated Beta)
-    lb_km1 = np.maximum(lb[..., K - 2], 1 - np.sum(ub, axis=-1) + ub[..., K - 2])
-    ub_km1 = np.minimum(ub[..., K - 2], 1 - np.sum(lb, axis=-1) + lb[..., K - 2])
-    x[..., K - 2] = rtruncated_beta(
-        concentration[..., K - 2],
-        np.sum(concentration, axis=-1) - concentration[..., K - 2],
-        lb=lb_km1,
-        ub=ub_km1,
-        rng=rng,
-    )
-
-    # Sample K-3, K-4, ..., 0 via conditional stick-breaking
-    for k in range(K - 3, -1, -1):
-        R = 1 - np.sum(x[..., k + 1 :], axis=-1)
-
-        ub_rest = np.sum(ub, axis=-1) - np.sum(ub[..., k : K - 1], axis=-1)
-        lb_rest = np.sum(lb, axis=-1) - np.sum(lb[..., k : K - 1], axis=-1)
-
-        z_lb = np.maximum(lb[..., k] / R, 1 - ub_rest / R)
-        z_ub = np.minimum(ub[..., k] / R, 1 - lb_rest / R)
-
-        beta_b = np.sum(concentration, axis=-1) - np.sum(
-            concentration[..., k : K - 1], axis=-1
+    tol = 1e-8
+    if (
+        np.any(lb > ub + tol)
+        or np.any(lb < -tol)
+        or np.any(ub > 1 + tol)
+        or np.any(lb.sum(axis=-1) > 1 + tol)
+        or np.any(ub.sum(axis=-1) < 1 - tol)
+    ):
+        raise ValueError(
+            "Infeasible bounds: require 0 <= lb <= ub <= 1, sum(lb) <= 1 "
+            "and sum(ub) >= 1 along the last axis."
         )
 
-        x[..., k] = (
-            rtruncated_beta(concentration[..., k], beta_b, lb=z_lb, ub=z_ub, rng=rng)
-            * R
+    if K == 2:
+        x0 = rtruncated_beta(
+            concentration[..., 0],
+            concentration[..., 1],
+            lb=np.maximum(lb[..., 0], 1 - ub[..., 1]),
+            ub=np.minimum(ub[..., 0], 1 - lb[..., 1]),
+            rng=rng,
         )
+        return np.stack([x0, 1 - x0], axis=-1)
 
-    x[..., K - 1] = 1 - np.sum(x[..., : K - 1], axis=-1)
+    # Feasible starting point: move every component the same fraction w of
+    # the way from lb to ub, with w chosen so the components sum to one.
+    width = ub - lb
+    with np.errstate(divide="ignore", invalid="ignore"):
+        w = (1 - lb.sum(axis=-1, keepdims=True)) / width.sum(axis=-1, keepdims=True)
+    x = lb + np.nan_to_num(w, nan=0.0) * width
+
+    for _ in range(n_sweeps):
+        perm = rng.permutation(K)
+        for i, j in zip(perm, np.roll(perm, 1)):
+            c = x[..., i] + x[..., j]
+            lo = np.maximum(lb[..., i], c - ub[..., j])
+            hi = np.minimum(ub[..., i], c - lb[..., j])
+            with np.errstate(divide="ignore", invalid="ignore"):
+                u_lb = np.clip(lo / c, 0.0, 1.0)
+                u_ub = np.clip(hi / c, 0.0, 1.0)
+            u = rtruncated_beta(
+                concentration[..., i],
+                concentration[..., j],
+                lb=np.nan_to_num(u_lb, nan=0.0),
+                ub=np.nan_to_num(u_ub, nan=0.0),
+                rng=rng,
+            )
+            x_i = np.clip(u * c, lo, hi)
+            x_i = np.where(c > 0, x_i, 0.0)
+            x[..., i] = x_i
+            x[..., j] = c - x_i
+
     return x
 
 
