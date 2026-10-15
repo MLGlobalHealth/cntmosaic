@@ -178,6 +178,32 @@ class TestDataLoading:
         assert isinstance(model.dix, np.ndarray)
         assert isinstance(model.six, np.ndarray)
 
+    def test_structural_zeros_unstratified(self, single_large_sample):
+        """Every participant contributes one row per contact age group, zero-filled."""
+        part_data, cnt_data, _ = single_large_sample
+        age_bins = AgeBins(0, 80, 5)
+        model = Prem(part_data, cnt_data, age_bins)
+
+        # Full respondent x contact-age-group grid, no strata
+        assert len(model.y) == model.N * model.D
+        # Unreported contact age groups are present as structural zeros
+        assert (model.y == 0).any()
+        # Each respondent maps to exactly one participant age group
+        assert (pd.Series(model.cix).groupby(model.iix).nunique() == 1).all()
+
+    def test_structural_zeros_stratified(self, full_large_sample):
+        """Structural zeros span contact strata without duplicating rows."""
+        part_data, cnt_data, _ = full_large_sample
+        age_bins = AgeBins(0, 80, 5)
+        model = Prem(part_data, cnt_data, age_bins)
+
+        assert (model.y == 0).any()
+        # One row per (respondent, contact-age-group, stratum) cell
+        rows = pd.DataFrame({"iix": model.iix, "dix": model.dix, "six": model.six})
+        assert not rows.duplicated().any()
+        # Participant age group stays 1:1 with the respondent
+        assert (pd.Series(model.cix).groupby(model.iix).nunique() == 1).all()
+
     def test_strat_ix_partial(self, partial_large_sample):
         """Test stratum indices for participant-stratified model."""
 
