@@ -205,7 +205,11 @@ class ContactSurveyLoader:
         self.model_data = ModelData(
             y=df_full["y"].to_numpy(),
             log_N=np.log(df_full["N"].to_numpy()),
-            log_P=construct_log_P(self.pop_data, self.col_map),
+            log_P=construct_log_P(
+                self.pop_data,
+                self.col_map,
+                strat_modes=strat_kwargs.get("strat_modes", {}),
+            ),
             age_min=self.min_age,
             age_max=self.max_age,
             aid=aid,

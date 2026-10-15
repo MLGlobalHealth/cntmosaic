@@ -6,12 +6,13 @@ independently testable and to support the ContactSurveyLoader pipeline.
 """
 
 import warnings
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from .._types import StratMode
 from ._ColumnSpec import ColumnSpec
 from ._utils import gaussian_smooth_by_group
 
@@ -198,15 +199,50 @@ def build_observation_grid(
     return df_full
 
 
-def construct_log_P(pop_df: pd.DataFrame, col_spec: ColumnSpec) -> NDArray:
+def construct_log_P(
+    pop_df: pd.DataFrame,
+    col_spec: ColumnSpec,
+    strat_modes: Optional[Dict[str, StratMode]] = None,
+) -> NDArray:
     """
-    Construct log population proportions (log_P) from population data.
+    Construct log contact population sizes (log_P) from population data.
 
-    Returns shape (1, A) for unstratified or (K, A) for stratified cases.
+    ``log_P[pix, b]`` is the log population of contacts with age b in contact
+    stratum ``pix``.  Only FULL-mode variables stratify the contact side, so
+    when ``strat_modes`` is given the population is summed over every other
+    variable, giving one row per combination of FULL-mode variables, ordered
+    to match ``infer_strat_pixs`` (first variable slowest).  With no FULL-mode
+    variables (PARTIAL-only or unstratified models) the single row is the
+    total population.
+
+    If ``strat_modes`` is None, one row per combination of all population
+    stratification variables is returned (legacy behaviour).
+
+    Returns shape (1, A) for a single row or (K, A) for K contact strata.
     A may be fine-age count or coarse-group count depending on population resolution.
     """
+    age_dim = col_spec.pop_age or col_spec.pop_age_grp
+
+    if strat_modes is not None:
+        full_vars = [v for v, mode in strat_modes.items() if mode == StratMode.FULL]
+        if not full_vars:
+            P = (
+                pop_df.groupby(age_dim, observed=False)[col_spec.P]
+                .sum()
+                .sort_index()
+                .to_numpy()[np.newaxis, :]
+            )  # shape (1, A) or (1, B)
+        else:
+            P = (
+                pop_df.groupby(full_vars + [age_dim], observed=False)[col_spec.P]
+                .sum()
+                .unstack(age_dim)
+                .fillna(1)
+                .to_numpy()
+            )  # shape (K, A) or (K, B)
+        return np.log(P)
+
     if col_spec.pop_strat_vars:
-        age_dim = col_spec.pop_age or col_spec.pop_age_grp
         P = (
             pop_df.pivot(
                 index=col_spec.pop_strat_vars,
