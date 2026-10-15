@@ -46,9 +46,15 @@ class Predictor:
     Examples
     --------
     >>> predictor = Predictor(summariser, dataloader)
-    >>> cint_dict = predictor.predict_full_matrices(alpha=1.0, rng=rng)
+    >>> cint_dict = predictor.predict_full_matrices(alpha=2.0, rng=rng)
     >>> cint_dict["Male->Female"].shape   # (S, A, A)
     >>> rho = predictor.spectral_radius()
+
+    Keep the sampled associativity fractions for inspection:
+
+    >>> cint_dict = predictor.predict_full_matrices(rng=rng, store_eta=True)
+    >>> eta = predictor.get_eta_samples()
+    >>> eta["Male->Female"].shape         # (S, A, A)
     """
 
     def __init__(
@@ -78,6 +84,7 @@ class Predictor:
         self._z_marg: Optional[Dict[str, NDArray]] = None
         self._frechet_lb: Optional[Dict[str, NDArray]] = None
         self._frechet_ub: Optional[Dict[str, NDArray]] = None
+        self._eta: Optional[Dict[str, NDArray]] = None
 
     # ------------------------------------------------------------------
     # Lazy loading
@@ -107,20 +114,27 @@ class Predictor:
 
     def predict_full_matrices(
         self,
-        alpha: float = 1.0,
+        alpha: float = 2.0,
         rng: Optional[np.random.Generator] = None,
         external_eta: Optional[Dict[str, NDArray]] = None,
         external_counts: Optional[Dict[str, NDArray]] = None,
+        store_eta: bool = False,
     ) -> Dict[str, NDArray]:
         """
         Sample fully stratified contact intensity matrices.
+
+        The fully stratified intensities are obtained by multiplying the
+        partially stratified posterior intensities by sampled associativity
+        fractions (eta).  Set ``store_eta=True`` to keep these fractions for
+        retrieval via :meth:`get_eta_samples`.
 
         Parameters
         ----------
         alpha : float, optional
             Dirichlet precision for the associativity fraction prior
-            (default 1.0).  Higher values pull samples toward the
-            population-proportion prior.
+            (default 2.0).  Higher values pull samples toward the
+            population-proportion prior.  Must be large enough for the
+            prior to be proper; see :func:`sample_eta`.
         rng : numpy.random.Generator or None, optional
             Random number generator.  If ``None``, a new generator is created.
         external_eta : Dict[str, NDArray] or None, optional
@@ -129,6 +143,13 @@ class Predictor:
         external_counts : Dict[str, NDArray] or None, optional
             External contact counts to augment the Dirichlet concentration,
             shape ``(A, A, K)`` per key.
+        store_eta : bool, optional
+            If ``True``, keep the sampled associativity fractions so they can
+            be retrieved with :meth:`get_eta_samples` (default ``False``).
+            The stored fractions take as much memory as the returned
+            matrices: K² arrays of shape ``(S, A, A)``.  Every call replaces
+            the stored fractions, or clears them when ``store_eta=False``,
+            so they always correspond to the most recent prediction.
 
         Returns
         -------
@@ -153,23 +174,29 @@ class Predictor:
         sample_cint = self.summariser.get_posterior_samples("cint")
         strata = self.strata
 
-        return {
+        cint_dict = {
             f"{s}->{t}": sample_cint[f"{s}->All"] * samples_eta[f"{s}->{t}"]
             for s in strata
             for t in strata
         }
+        self._eta = samples_eta if store_eta else None
+
+        return cint_dict
 
     def spectral_radius(
         self,
         method: str = "generalised",
-        alpha: float = 1.0,
+        alpha: float = 2.0,
         rng: Optional[np.random.Generator] = None,
+        store_eta: bool = False,
     ) -> Union[float, NDArray]:
         """
         Compute the spectral radius of the predicted fully stratified matrices.
 
         Calls :meth:`predict_full_matrices` internally, then passes the result
-        to the :func:`spectral_radius` free function.
+        to the :func:`spectral_radius` free function.  Because a new
+        prediction is drawn, any previously stored associativity fractions
+        are replaced (``store_eta=True``) or cleared (``store_eta=False``).
 
         Parameters
         ----------
@@ -177,9 +204,11 @@ class Predictor:
             Spectral radius method (default ``"generalised"``).
         alpha : float, optional
             Dirichlet precision passed to :meth:`predict_full_matrices`
-            (default 1.0).
+            (default 2.0).
         rng : numpy.random.Generator or None, optional
             Random number generator passed to :meth:`predict_full_matrices`.
+        store_eta : bool, optional
+            Passed to :meth:`predict_full_matrices` (default ``False``).
 
         Returns
         -------
@@ -187,11 +216,42 @@ class Predictor:
             Scalar for point-estimate matrices; array of shape ``(S,)`` for
             posterior sample matrices.
         """
-        matrices = self.predict_full_matrices(alpha=alpha, rng=rng)
+        matrices = self.predict_full_matrices(
+            alpha=alpha, rng=rng, store_eta=store_eta
+        )
         return _spectral_radius_fn(matrices, self.dataloader, method=method)
 
+    def get_eta_samples(self) -> Dict[str, NDArray]:
+        """Return the associativity fractions stored by the last prediction.
+
+        The fractions are only kept when :meth:`predict_full_matrices` (or
+        :meth:`spectral_radius`) is called with ``store_eta=True``.
+
+        Returns
+        -------
+        Dict[str, NDArray]
+            Dictionary mapping ``"source->target"`` stratum pairs to
+            associativity fraction arrays of shape ``(S, A, A)``, keyed like
+            the output of :meth:`predict_full_matrices`.  The dictionary is
+            new, but the arrays are shared with the internal store to avoid
+            doubling memory; do not modify them in place.
+
+        Raises
+        ------
+        RuntimeError
+            If no associativity fractions are stored, i.e. the most recent
+            prediction was made with ``store_eta=False`` or the cache was
+            cleared.
+        """
+        if self._eta is None:
+            raise RuntimeError(
+                "No eta samples stored. Call "
+                "predict_full_matrices(store_eta=True) first."
+            )
+        return dict(self._eta)
+
     def clear_cache(self) -> None:
-        """Clear cached z-marginals and Fréchet bounds.
+        """Clear cached z-marginals, Fréchet bounds and stored eta samples.
 
         Forces recomputation on the next call to :meth:`predict_full_matrices`
         or :meth:`spectral_radius`.
@@ -199,6 +259,7 @@ class Predictor:
         self._z_marg = None
         self._frechet_lb = None
         self._frechet_ub = None
+        self._eta = None
 
     def get_cache_info(self) -> Dict[str, Any]:
         """Return information about the lazy-loaded cache.
@@ -209,12 +270,14 @@ class Predictor:
             ``bounds_loaded`` — whether bounds have been computed.
             ``strata``        — stratum labels, or ``"not loaded"``.
             ``model_type``    — ``"genmix"``.
+            ``eta_stored``    — whether eta samples are stored.
         """
         loaded = self._z_marg is not None
         return {
             "bounds_loaded": loaded,
             "strata": self.strata if loaded else "not loaded",
             "model_type": self.summariser.model_type,
+            "eta_stored": self._eta is not None,
         }
 
     # ------------------------------------------------------------------

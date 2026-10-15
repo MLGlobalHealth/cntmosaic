@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import warnings
+from typing import Dict, Literal, Optional, Tuple, Union
+
 import numpy as np
 import pandas as pd
+from numpy.typing import ArrayLike, NDArray
 from scipy.stats import beta
 
-from typing import Dict, Literal, Optional, Tuple, Union
-from numpy.typing import ArrayLike, NDArray
-
-from ..dataloader import ContactSurveyLoader
 from ..analysis import ModelSummariser
+from ..dataloader import ContactSurveyLoader
 
 
 def _compute_P_sa(dataloader: ContactSurveyLoader) -> Dict[str, np.ndarray]:
@@ -41,7 +42,7 @@ def _compute_P_sa(dataloader: ContactSurveyLoader) -> Dict[str, np.ndarray]:
         .values
     )
     Q_sa, labels = dataloader.strat_data._build_Q_and_labels(
-        dataloader.strat_data.strat_var_cols
+        dataloader.strat_data.strat_var_cols  # type: ignore
     )
     return {str(lab): Q_sa[i] * P_a for i, lab in enumerate(labels)}
 
@@ -79,7 +80,7 @@ def z_marginals(
     cint_samples = summariser.get_posterior_samples("cint")
 
     # Extract source labels
-    source_labs = [str(key).replace("->All", "") for key in cint_samples.keys()]
+    source_labs = [str(key).replace("->All", "") for key in cint_samples.keys()]  # type: ignore
 
     # Extract stratified population sizes: Dict[str, NDArray] with shape (A,)
     P_sa = _compute_P_sa(dataloader)
@@ -362,127 +363,251 @@ def rtruncated_dirichlet(
     return x
 
 
+def _slice_step(
+    base: np.ndarray,
+    sign: np.ndarray,
+    weight: np.ndarray,
+    rng: np.random.Generator,
+    max_shrink: int = 100,
+) -> np.ndarray:
+    """One shrinkage slice-sampling update of a step ``d`` along a move.
+
+    The move changes m table entries to ``base + sign * d`` and the log
+    density is ``sum_j weight_j * log(base_j + sign_j * d)``.
+
+    Parameters
+    ----------
+    base : np.ndarray
+        Current values of the entries, shape ``(..., m)``.
+    sign : np.ndarray
+        Direction of each entry, +1 or -1, shape ``(m,)``.
+    weight : np.ndarray
+        Exponent of each entry, broadcastable to ``base``.
+    rng : numpy.random.Generator
+        Random number generator.
+    max_shrink : int, optional
+        Maximum number of shrinkage steps (default 100).
+
+    Returns
+    -------
+    np.ndarray
+        Step ``d`` of shape ``base.shape[:-1]``; 0 where the move has no room.
+    """
+    lo = np.max(np.where(sign > 0, -base, -np.inf), axis=-1)
+    hi = np.min(np.where(sign < 0, base, np.inf), axis=-1)
+
+    def log_density(d):
+        with np.errstate(divide="ignore", invalid="ignore"):
+            terms = weight * np.log(base + sign * d[..., np.newaxis])
+        return np.sum(np.where(weight == 0, 0.0, terms), axis=-1)
+
+    todo = hi > lo
+    d = np.zeros(lo.shape)
+    y = np.where(todo, log_density(d), 0.0) - rng.exponential(size=d.shape)
+    left = np.where(todo, lo, 0.0)
+    right = np.where(todo, hi, 0.0)
+    for _ in range(max_shrink):
+        if not todo.any():
+            break
+        prop = left + (right - left) * rng.uniform(size=d.shape)
+        ok = todo & (log_density(prop) > y)
+        d = np.where(ok, prop, d)
+        todo &= ~ok
+        below = todo & (prop < 0)
+        left = np.where(below, prop, left)
+        right = np.where(todo & ~below, prop, right)
+    return d
+
+
 def sample_eta(
     z_marg: Dict[str, np.ndarray],
     eta_lb: Dict[str, np.ndarray],
     eta_ub: Dict[str, np.ndarray],
     dataloader: ContactSurveyLoader,
-    alpha: float = 1.0,
+    alpha: float = 2.0,
     external_eta: Dict[str, np.ndarray] | None = None,
     external_counts: Dict[str, np.ndarray] | None = None,
     rng: np.random.Generator | None = None,
+    n_sweeps: int = 20,
 ) -> Dict[str, np.ndarray]:
     """
-    Sample an array of associativity fractions.
+    Sample associativity fractions satisfying reciprocity and sum-to-one.
 
-    For each source stratum, draws associativity fractions
-    ``eta[source->target]`` from a truncated Dirichlet distribution whose
-    concentration is proportional to the stratified population sizes.  The
-    lower triangle (participant age >= contact age) is sampled directly;
-    the strictly upper triangle is filled via the reciprocity identity,
-    and diagonals of off-diagonal stratum pairs are corrected accordingly.
+    The fully stratified counts are ``Z^{st}_ab = z^s_ab * eta^{st}_ab``.
+    They must satisfy, exactly,
+
+    - reciprocity: ``Z^{st}_ab = Z^{ts}_ba``, and
+    - sum-to-one: ``sum_t eta^{st}_ab = 1`` in every cell.
+
+    Both constraints only link a cell ``(a, b)`` with its mirror ``(b, a)``.
+    For ``a > b`` the counts ``X[s, t] = Z^{st}_ab`` form a K x K table whose
+    row sums are ``z^s_ab`` and whose column sums are ``z^t_ba``; the mirror
+    cell holds ``X^T``.  On the diagonal ``X`` is symmetric with row sums
+    ``z^s_aa``.  Every non-negative table with these sums satisfies both
+    constraints, and its entries lie within the Fréchet bounds.
+
+    The prior is a Dirichlet on each source's fractions at both cells of a
+    pair, with concentration ``alpha * Q^t_b`` (the target stratum's
+    population share at the contact age) plus any external terms,
+    restricted to valid tables.  Tables are sampled by MCMC: starting from
+    the independence table, each sweep applies every margin-preserving 2 x 2
+    swap move (symmetric moves on the diagonal), drawing each step by slice
+    sampling.  Every (posterior sample, age pair) runs its own chain.
 
     Parameters
     ----------
     z_marg : Dict[str, np.ndarray]
-        Dictionary mapping stratum labels to marginal contact count arrays
-        of shape ``(S, A, A)`` (output of :func:`z_marginals`).
+        Dictionary mapping stratum labels to partially stratified contact
+        count arrays of shape ``(S, A, A)`` (output of :func:`z_marginals`).
+        The totals ``sum_s z^s_ab`` must be reciprocal in ``(a, b)``.
     eta_lb : Dict[str, np.ndarray]
-        Lower Frechet bounds for each ``"source->target"`` pair,
-        shape ``(S, A, A)``.
+        Lower Fréchet bounds for each ``"source->target"`` pair.  Not used:
+        the table constraints imply them.  Kept for backward compatibility.
     eta_ub : Dict[str, np.ndarray]
-        Upper Frechet bounds for each ``"source->target"`` pair,
-        shape ``(S, A, A)``.
+        Upper Fréchet bounds for each ``"source->target"`` pair.  Not used,
+        as for ``eta_lb``.
     dataloader : ContactSurveyLoader
-        An instantiated ContactSurveyLoader.  Used to extract stratified population
-        sizes via ``_compute_P_sa`` for the Dirichlet concentration.
+        An instantiated ContactSurveyLoader.  Used to extract stratified
+        population sizes via ``_compute_P_sa`` for the Dirichlet concentration.
     alpha : float, optional
-        Dirichlet precision — scales the total concentration per age group
-        (default 1.0). Higher values pull samples closer to the population-
-        proportion prior.
+        Dirichlet precision (default 2.0).  The concentration of source s on
+        target t at cell ``(a, b)`` is ``alpha * Q^t_b``.  Because reciprocity
+        ties ``eta^{st}_ab`` to ``eta^{ts}_ba``, the prior is only proper when
+        the two concentrations sum to more than 1 for every such pair; a
+        ``ValueError`` reports the minimum ``alpha`` otherwise.
     external_eta : Dict[str, np.ndarray] or None, optional
         External associativity fractions to add to the concentration,
-        shape ``(A, A, K)`` per key.  If ``None``, ignored.
+        shape ``(A, A)`` per ``"source->target"`` key.  If ``None``, ignored.
     external_counts : Dict[str, np.ndarray] or None, optional
         External contact counts to add to the concentration,
-        shape ``(A, A, K)`` per key.  If ``None``, ignored.
+        shape ``(A, A)`` per ``"source->target"`` key.  If ``None``, ignored.
     rng : numpy.random.Generator or None, optional
         Random number generator.  If ``None``, a new generator is created.
+    n_sweeps : int, optional
+        Number of MCMC sweeps (default 20).  Each sweep makes
+        ``(K choose 2)^2`` slice updates per off-diagonal age pair.
 
     Returns
     -------
     Dict[str, np.ndarray]
         Dictionary mapping ``"source->target"`` labels to associativity
-        fraction arrays of shape ``(S, A, A)``.
+        fraction arrays of shape ``(S, A, A)``.  Cells where a source has no
+        contacts (``z^s_ab = 0``) are set to 0.
+
+    Raises
+    ------
+    ValueError
+        If the prior is improper for the given concentrations.
     """
+    if rng is None:
+        rng = np.random.default_rng()
+
     strata_names = list(z_marg.keys())
     K = len(strata_names)
-    S, A, _ = next(iter(eta_lb.values())).shape
+    zm = np.stack([np.asarray(z_marg[s], dtype=float) for s in strata_names], axis=1)
+    S, _, A, _ = zm.shape  # (S, K, A, A)
 
+    # Concentration conc[s, t, a, b] of source s on target t at cell (a, b)
     P_sa = _compute_P_sa(dataloader)
-    # Normalize to proportions first, then scale by alpha so that
-    # concentration.sum(axis=-1) == alpha for every age group.
-    concentration = np.stack([P_sa[t] for t in strata_names], axis=-1)  # (A, K)
-    concentration /= concentration.sum(axis=-1, keepdims=True)
-    concentration = alpha * concentration
+    Pt = np.stack([P_sa[t] for t in strata_names], axis=-1)  # (A, K)
+    Q = Pt / Pt.sum(axis=-1, keepdims=True)
+    conc = np.broadcast_to(alpha * Q.T[np.newaxis, :, np.newaxis, :], (K, K, A, A)).copy()
+    for ext in (external_eta, external_counts):
+        if ext is not None:
+            conc += np.stack(
+                [np.stack([ext[f"{s}->{t}"] for t in strata_names]) for s in strata_names]
+            )
 
-    tril_mask = np.tril(np.ones((A, A), dtype=bool))  # a >= b (sampled)
-    striu_mask = ~tril_mask  # a < b  (filled via reciprocity)
-    diag_idx = np.arange(A)
+    ia, ib = np.tril_indices(A, k=-1)  # off-diagonal pairs, a > b
+    dg = np.arange(A)
 
-    eta_out = {}
-    for source in strata_names:
-        _lb = np.stack([eta_lb[f"{source}->{t}"] for t in strata_names], axis=-1)
-        _ub = np.stack([eta_ub[f"{source}->{t}"] for t in strata_names], axis=-1)
+    # Exponents of each table entry in the log density
+    e_off = (conc[:, :, ia, ib] - 1).transpose(2, 0, 1) + (
+        conc[:, :, ib, ia] - 1
+    ).transpose(2, 1, 0)  # (n, K, K): X[s,t] is Z^{st}_ab and Z^{ts}_ba
+    e_diag = (conc[:, :, dg, dg] - 1).transpose(2, 0, 1)  # (A, K, K)
 
-        conc = concentration[np.newaxis, np.newaxis, :, :]
-        if external_eta is not None:
-            _ext = np.stack(
-                [external_eta[f"{source}->{t}"] for t in strata_names], axis=-1
-            )  # shape (A, A, K)
-            conc = conc + _ext[np.newaxis, :, :, :]  # broadcast to (S, A, A, K)
+    # Properness: entries that vanish together need total exponent > -1
+    worst = min(
+        e_off.min() if e_off.size else np.inf,
+        (e_diag + e_diag.transpose(0, 2, 1))[:, ~np.eye(K, dtype=bool)].min()
+        if K > 1
+        else np.inf,
+    )
+    if worst <= -1:
+        Q_pair = np.concatenate(
+            [
+                (Q[ib][:, np.newaxis, :] + Q[ia][:, :, np.newaxis]).ravel(),
+                (Q[:, :, np.newaxis] + Q[:, np.newaxis, :])[:, ~np.eye(K, dtype=bool)].ravel(),
+            ]
+        )
+        raise ValueError(
+            f"The eta prior is improper for alpha={alpha}: reciprocity ties "
+            "eta^{st}_ab to eta^{ts}_ba, so their concentrations must sum to "
+            f"more than 1 (smallest sum: {worst + 2:.3f}). Without external "
+            f"terms this requires alpha > {1 / Q_pair.min():.3f}."
+        )
 
-        if external_counts is not None:
-            _ext = np.stack(
-                [external_counts[f"{source}->{t}"] for t in strata_names], axis=-1
-            )  # shape (A, A, K)
-            conc = conc + _ext[np.newaxis, :, :, :]  # broadcast to (S, A, A, K)
+    # Table margins; rescale column sums so both margins share one total
+    r = zm[:, :, ia, ib].transpose(0, 2, 1)  # (S, n, K) row sums z^s_ab
+    c = zm[:, :, ib, ia].transpose(0, 2, 1)  # (S, n, K) column sums z^t_ba
+    r_tot, c_tot = r.sum(axis=-1), c.sum(axis=-1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        asym = np.abs(r_tot - c_tot) / np.maximum(r_tot, c_tot)
+        if np.nanmax(asym, initial=0.0) > 1e-3:
+            warnings.warn(
+                "Total contact counts are not reciprocal (max relative asymmetry "
+                f"{np.nanmax(asym):.2e}); column sums are rescaled to match.",
+                UserWarning,
+                stacklevel=2,
+            )
+        c = c * np.nan_to_num(r_tot / c_tot, nan=1.0)[..., np.newaxis]
+        X = np.nan_to_num(r[..., :, np.newaxis] * c[..., np.newaxis, :] / r_tot[..., np.newaxis, np.newaxis])
 
-        eta_draw = rtruncated_dirichlet(conc, lb=_lb, ub=_ub, rng=rng)
+        rd = zm[:, :, dg, dg].transpose(0, 2, 1)  # (S, A, K)
+        rd_tot = rd.sum(axis=-1)
+        Xd = np.nan_to_num(rd[..., :, np.newaxis] * rd[..., np.newaxis, :] / rd_tot[..., np.newaxis, np.newaxis])
 
-        # Keep only lower triangle (a >= b)
-        eta_draw *= tril_mask[np.newaxis, :, :, np.newaxis]
+    pairs = [(i, j) for i in range(K) for j in range(i + 1, K)]
+    swap_sign = np.array([1.0, 1.0, -1.0, -1.0])
+    diag_sign = np.array([1.0, -1.0, -1.0])
+    for _ in range(n_sweeps):
+        for s1, s2 in pairs:
+            for t1, t2 in pairs:
+                # Rows s1, s2 and columns t1, t2: +d on (s1,t1),(s2,t2); -d on the others
+                ent = [(s1, t1), (s2, t2), (s1, t2), (s2, t1)]
+                base = np.stack([X[..., i, j] for i, j in ent], axis=-1)
+                w = np.stack([e_off[:, i, j] for i, j in ent], axis=-1)
+                d = _slice_step(base, swap_sign, w, rng)
+                for (i, j), sg in zip(ent, swap_sign):
+                    X[..., i, j] += sg * d
+        for s, t in pairs:
+            # Symmetric move: +d on (s,t) and (t,s); -d on (s,s) and (t,t)
+            base = np.stack([Xd[..., s, t], Xd[..., s, s], Xd[..., t, t]], axis=-1)
+            w = np.stack(
+                [e_diag[:, s, t] + e_diag[:, t, s], e_diag[:, s, s], e_diag[:, t, t]],
+                axis=-1,
+            )
+            d = _slice_step(base, diag_sign, w, rng)
+            Xd[..., s, t] += d
+            Xd[..., t, s] += d
+            Xd[..., s, s] -= d
+            Xd[..., t, t] -= d
 
-        for j, target in enumerate(strata_names):
-            eta_out[f"{source}->{target}"] = eta_draw[..., j]
+    eta = np.zeros((S, K, K, A, A))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        # (a, b): eta^{st} = X[s, t] / z^s_ab ; (b, a): eta^{st} = X[t, s] / z^s_ba
+        eta[:, :, :, ia, ib] = np.nan_to_num(X / r[..., :, np.newaxis]).transpose(0, 2, 3, 1)
+        eta[:, :, :, ib, ia] = np.nan_to_num(
+            X.swapaxes(-1, -2) / c[..., :, np.newaxis]
+        ).transpose(0, 2, 3, 1)
+        eta[:, :, :, dg, dg] = np.nan_to_num(Xd / rd[..., :, np.newaxis]).transpose(0, 2, 3, 1)
 
-    # Fill strictly upper triangle via reciprocity
-    for ell in strata_names:
-        for k in strata_names:
-            with np.errstate(divide="ignore", invalid="ignore"):
-                fill = (
-                    z_marg[k].transpose(0, 2, 1)
-                    / z_marg[ell]
-                    * eta_out[f"{k}->{ell}"].transpose(0, 2, 1)
-                )
-                fill = np.nan_to_num(fill, nan=0.0, posinf=0.0, neginf=0.0)
-            eta_out[f"{ell}->{k}"] += fill * striu_mask[np.newaxis, :, :]
-
-    # Fix diagonal for off-diagonal category pairs
-    for i, ell in enumerate(strata_names):
-        for j, k in enumerate(strata_names):
-            if i <= j:
-                continue
-            with np.errstate(divide="ignore", invalid="ignore"):
-                diag_fix = (
-                    z_marg[k][:, diag_idx, diag_idx]
-                    / z_marg[ell][:, diag_idx, diag_idx]
-                    * eta_out[f"{k}->{ell}"][:, diag_idx, diag_idx]
-                )
-                diag_fix = np.nan_to_num(diag_fix, nan=0.0, posinf=0.0, neginf=0.0)
-            eta_out[f"{ell}->{k}"][:, diag_idx, diag_idx] = diag_fix
-
-    return eta_out
+    return {
+        f"{s}->{t}": eta[:, i, j]
+        for i, s in enumerate(strata_names)
+        for j, t in enumerate(strata_names)
+    }
 
 
 def spectral_radius(
