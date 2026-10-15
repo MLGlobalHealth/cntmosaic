@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import ArrayLike, NDArray
 from scipy.stats import beta
+from tqdm import tqdm
 
 from ..analysis import ModelSummariser
 from ..dataloader import ContactSurveyLoader
@@ -429,6 +430,7 @@ def sample_eta(
     external_counts: Dict[str, np.ndarray] | None = None,
     rng: np.random.Generator | None = None,
     n_sweeps: int = 20,
+    progress: bool = False,
 ) -> Dict[str, np.ndarray]:
     """
     Sample associativity fractions satisfying reciprocity and sum-to-one.
@@ -486,6 +488,8 @@ def sample_eta(
     n_sweeps : int, optional
         Number of MCMC sweeps (default 20).  Each sweep makes
         ``(K choose 2)^2`` slice updates per off-diagonal age pair.
+    progress : bool, optional
+        Show a tqdm progress bar over the MCMC moves (default False).
 
     Returns
     -------
@@ -571,28 +575,32 @@ def sample_eta(
     pairs = [(i, j) for i in range(K) for j in range(i + 1, K)]
     swap_sign = np.array([1.0, 1.0, -1.0, -1.0])
     diag_sign = np.array([1.0, -1.0, -1.0])
-    for _ in range(n_sweeps):
-        for s1, s2 in pairs:
-            for t1, t2 in pairs:
-                # Rows s1, s2 and columns t1, t2: +d on (s1,t1),(s2,t2); -d on the others
-                ent = [(s1, t1), (s2, t2), (s1, t2), (s2, t1)]
-                base = np.stack([X[..., i, j] for i, j in ent], axis=-1)
-                w = np.stack([e_off[:, i, j] for i, j in ent], axis=-1)
-                d = _slice_step(base, swap_sign, w, rng)
-                for (i, j), sg in zip(ent, swap_sign):
-                    X[..., i, j] += sg * d
-        for s, t in pairs:
-            # Symmetric move: +d on (s,t) and (t,s); -d on (s,s) and (t,t)
-            base = np.stack([Xd[..., s, t], Xd[..., s, s], Xd[..., t, t]], axis=-1)
-            w = np.stack(
-                [e_diag[:, s, t] + e_diag[:, t, s], e_diag[:, s, s], e_diag[:, t, t]],
-                axis=-1,
-            )
-            d = _slice_step(base, diag_sign, w, rng)
-            Xd[..., s, t] += d
-            Xd[..., t, s] += d
-            Xd[..., s, s] -= d
-            Xd[..., t, t] -= d
+    n_moves = len(pairs) ** 2 + len(pairs)
+    with tqdm(total=n_sweeps * n_moves, desc="Sampling eta", disable=not progress) as pbar:
+        for _ in range(n_sweeps):
+            for s1, s2 in pairs:
+                for t1, t2 in pairs:
+                    # Rows s1, s2 and columns t1, t2: +d on (s1,t1),(s2,t2); -d on the others
+                    ent = [(s1, t1), (s2, t2), (s1, t2), (s2, t1)]
+                    base = np.stack([X[..., i, j] for i, j in ent], axis=-1)
+                    w = np.stack([e_off[:, i, j] for i, j in ent], axis=-1)
+                    d = _slice_step(base, swap_sign, w, rng)
+                    for (i, j), sg in zip(ent, swap_sign):
+                        X[..., i, j] += sg * d
+                    pbar.update(1)
+            for s, t in pairs:
+                # Symmetric move: +d on (s,t) and (t,s); -d on (s,s) and (t,t)
+                base = np.stack([Xd[..., s, t], Xd[..., s, s], Xd[..., t, t]], axis=-1)
+                w = np.stack(
+                    [e_diag[:, s, t] + e_diag[:, t, s], e_diag[:, s, s], e_diag[:, t, t]],
+                    axis=-1,
+                )
+                d = _slice_step(base, diag_sign, w, rng)
+                Xd[..., s, t] += d
+                Xd[..., t, s] += d
+                Xd[..., s, s] -= d
+                Xd[..., t, t] -= d
+                pbar.update(1)
 
     eta = np.zeros((S, K, K, A, A))
     with np.errstate(divide="ignore", invalid="ignore"):

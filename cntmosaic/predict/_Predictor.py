@@ -119,6 +119,7 @@ class Predictor:
         external_eta: Optional[Dict[str, NDArray]] = None,
         external_counts: Optional[Dict[str, NDArray]] = None,
         store_eta: bool = False,
+        progress: bool = True,
     ) -> Dict[str, NDArray]:
         """
         Sample fully stratified contact intensity matrices.
@@ -150,6 +151,9 @@ class Predictor:
             matrices: K² arrays of shape ``(S, A, A)``.  Every call replaces
             the stored fractions, or clears them when ``store_eta=False``,
             so they always correspond to the most recent prediction.
+        progress : bool, optional
+            Show a progress bar while the associativity fractions are
+            sampled, the slowest step (default ``True``).
 
         Returns
         -------
@@ -170,6 +174,7 @@ class Predictor:
             external_eta=external_eta,
             external_counts=external_counts,
             rng=rng,
+            progress=progress,
         )
         sample_cint = self.summariser.get_posterior_samples("cint")
         strata = self.strata
@@ -189,6 +194,7 @@ class Predictor:
         alpha: float = 2.0,
         rng: Optional[np.random.Generator] = None,
         store_eta: bool = False,
+        progress: bool = True,
     ) -> Union[float, NDArray]:
         """
         Compute the spectral radius of the predicted fully stratified matrices.
@@ -209,6 +215,8 @@ class Predictor:
             Random number generator passed to :meth:`predict_full_matrices`.
         store_eta : bool, optional
             Passed to :meth:`predict_full_matrices` (default ``False``).
+        progress : bool, optional
+            Passed to :meth:`predict_full_matrices` (default ``True``).
 
         Returns
         -------
@@ -217,7 +225,7 @@ class Predictor:
             posterior sample matrices.
         """
         matrices = self.predict_full_matrices(
-            alpha=alpha, rng=rng, store_eta=store_eta
+            alpha=alpha, rng=rng, store_eta=store_eta, progress=progress
         )
         return _spectral_radius_fn(matrices, self.dataloader, method=method)
 
