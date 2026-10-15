@@ -53,15 +53,26 @@ def z_marginals(
     """
     Compute the expected partially stratified total contact counts z^s_ab.
 
-    Note: To be used for sampling associativity fractionals.
+    The counts are obtained as ``z^s_ab = m^s_ab * P^s_a``, where ``m^s_ab``
+    are posterior samples of the partially stratified contact intensities
+    and ``P^s_a`` the stratified source population sizes.  They are used to
+    derive the feasible mixing bounds and to sample associativity fractions.
 
     Parameters
     ----------
     summariser : ModelSummariser
-        Model summariser
+        A fitted partially stratified model summariser containing posterior
+        samples of the contact intensities ``"cint"``.
     dataloader : ContactSurveyLoader
         An instantiated ContactSurveyLoader. Used to extract stratified source population sizes
         by combining PopulationData (total counts) with StratificationData (proportions).
+
+    Returns
+    -------
+    Dict[str, NDArray]
+        Dictionary mapping source stratum labels to contact count arrays of
+        shape ``(S, A, A)``, where S is the number of posterior samples and
+        A is the number of age groups.
     """
 
     # Extract posterior contact intensity samples
@@ -87,25 +98,37 @@ def feasible_mixing_bounds(
     return_eta: bool = False,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
     """
-    Calculate feasible mixing bounds (Frechet-Hoeffding bounds) for attributable fractions.
+    Calculate feasible mixing bounds (Frechet-Hoeffding bounds) for every stratum pair.
+
+    For each ``source->target`` pair, the fully stratified contact counts
+    ``z^{st}_ab`` must be consistent with the partially stratified marginals
+    ``z^s_ab`` (source side) and ``z^t_ba`` (target side, via reciprocity).
+    This yields the Frechet-Hoeffding bounds
+
+    .. math::
+
+        \\max(0, z^t_{ba} - \\sum_{k \\neq s} z^k_{ab})
+        \\le z^{st}_{ab} \\le
+        \\min(z^t_{ba}, z^s_{ab}).
 
     Parameters
     ----------
-    z_marginals : dict
-        Dictionary containing marginal contact matrices for each group (output of z_marginals function)
-    source_lab : str
-        Source group lab in format "Sex_Ethnicity" (e.g., "Male_NH White")
-    target_lab : str
-        Target group lab in format "Sex_Ethnicity" (e.g., "Female_NH White")
-    normalize : bool, optional
-        Whether to normalize the bounds to be between 0 and 1 (default is False)
+    z_marginals : Dict[str, np.ndarray]
+        Dictionary mapping stratum labels to partially stratified contact
+        count arrays of shape ``(S, A, A)`` (output of :func:`z_marginals`).
+    return_eta : bool, optional
+        If ``False`` (default), return bounds on the contact counts
+        ``z^{st}_ab``.  If ``True``, return bounds on the associativity
+        fractions ``eta^{st}_ab = z^{st}_ab / z^s_ab``, clipped to ``[0, 1]``.
+        Entries undefined due to division by zero are set to 0 (lower bound)
+        and 1 (upper bound).
 
     Returns
     -------
-    tuple
-        Tuple containing two dictionaries:
-        - 'min': Lower bound array (n_samples x n_ages x n_ages)
-        - 'max': Upper bound array (n_samples x n_ages x n_ages)
+    Tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]
+        ``(lower, upper)`` where each dictionary maps ``"source->target"``
+        stratum pairs to bound arrays of shape ``(S, A, A)``, where S is the
+        number of posterior samples and A is the number of age groups.
     """
     labs = list(z_marginals.keys())
     min_dict = {}
@@ -403,48 +426,6 @@ def sample_eta(
             eta_out[f"{ell}->{k}"][:, diag_idx, diag_idx] = diag_fix
 
     return eta_out
-
-
-def predict_full_matrices(
-    summariser: ModelSummariser,
-    dataloader: ContactSurveyLoader,
-    rng: np.random.Generator | None = None,
-) -> Dict[str, NDArray]:
-    """
-    Predict fully stratified contact intensity matrices from the inference results of a partially stratified model.
-
-    Parameters
-    ----------
-    summariser : ModelSummariser
-        A fitted partially stratified model summariser containing posterior samples of the contact intensities.
-    dataloader : ContactSurveyLoader
-        The ContactSurveyLoader used to prepare the data for the model, required to extract population sizes for each stratum.
-    rng : np.random.Generator | None, optional
-        A random number generator for sampling associativity fractions. If None, a new generator will be created.
-
-    Returns
-    -------
-    Dict[str, NDArray]
-        A dictionary mapping "source->target" stratum pairs to predicted fully stratified contact intensity matrices of shape (S, A, A),
-        where S is the number of posterior samples and A is the number of age groups.
-    """
-
-    sample_z_marginals = z_marginals(summariser, dataloader)
-    eta_lb, eta_ub = feasible_mixing_bounds(sample_z_marginals, return_eta=True)
-    sample_cint = summariser.get_posterior_samples("cint")
-    samples_eta = sample_eta(sample_z_marginals, eta_lb, eta_ub, dataloader, rng=rng)
-
-    strata = list(sample_z_marginals.keys())
-
-    cint_dict = {}
-    for source_stratum in strata:
-        for target_stratum in strata:
-            cint_dict[f"{source_stratum}->{target_stratum}"] = (
-                sample_cint[f"{source_stratum}->All"]
-                * samples_eta[f"{source_stratum}->{target_stratum}"]
-            )
-
-    return cint_dict
 
 
 def spectral_radius(

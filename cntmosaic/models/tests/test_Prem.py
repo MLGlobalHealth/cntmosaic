@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 from jax.random import PRNGKey
 
-from ...analysis.summariser import ModelSummariserPrem
+from ...analysis.summariser import ContactSummary, ModelSummariserPrem
 from ...utils import AgeBins
 from ..classical import Prem
 from .fixtures import (
@@ -417,6 +417,14 @@ class TestInference:
         assert callable(model.posterior_predictive_svi)
 
 
+def _assert_summary_shape(cs, shape):
+    """Check a ContactSummary's lower/central/upper bounds all have ``shape``."""
+    assert isinstance(cs, ContactSummary)
+    assert cs.lower.shape == shape
+    assert cs.central.shape == shape
+    assert cs.upper.shape == shape
+
+
 class TestSummarizerIntegration:
 
     def test_single(self, single_small_sample):
@@ -430,23 +438,23 @@ class TestSummarizerIntegration:
 
         # Depixilated summary
         sum_cint = summariser.summarise_cint(return_depixilated=True)
-        assert sum_cint["All->All"].shape == (3, 81, 81)
+        _assert_summary_shape(sum_cint["All->All"], (81, 81))
 
         sum_mcint = summariser.summarise_mcint(return_depixilated=True)
-        assert sum_mcint["All->All"].shape == (3, 81)
+        _assert_summary_shape(sum_mcint["All->All"], (81,))
 
         # Pixilated summary
         sum_cint_pix = summariser.summarise_cint(return_depixilated=False)
-        assert sum_cint_pix["All->All"].shape == (3, 16, 16)
+        _assert_summary_shape(sum_cint_pix["All->All"], (16, 16))
 
         sum_mcint_pix = summariser.summarise_mcint(return_depixilated=False)
-        assert sum_mcint_pix["All->All"].shape == (3, 16)
+        _assert_summary_shape(sum_mcint_pix["All->All"], (16,))
 
         # No population data
         summariser = ModelSummariserPrem(model, num_samples=20)
 
         sum_cint = summariser.summarise_cint()
-        assert sum_cint["All->All"].shape == (3, 16, 16)
+        _assert_summary_shape(sum_cint["All->All"], (16, 16))
 
         with pytest.raises(ValueError):
             # Should raise error if requesting depixilated without pop data
@@ -464,20 +472,20 @@ class TestSummarizerIntegration:
         # Depixilated summary
         sum_cint = summariser.summarise_cint(return_depixilated=True)
         for label in sum_cint:
-            assert sum_cint[label].shape == (3, 81, 81)
+            _assert_summary_shape(sum_cint[label], (81, 81))
 
         sum_mcint = summariser.summarise_mcint(return_depixilated=True)
         for label in sum_mcint:
-            assert sum_mcint[label].shape == (3, 81)
+            _assert_summary_shape(sum_mcint[label], (81,))
 
         # Pixilated summary
         sum_cint_pix = summariser.summarise_cint(return_depixilated=False)
         for label in sum_cint_pix:
-            assert sum_cint_pix[label].shape == (3, 16, 16)
+            _assert_summary_shape(sum_cint_pix[label], (16, 16))
 
         sum_mcint_pix = summariser.summarise_mcint(return_depixilated=False)
         for label in sum_mcint_pix:
-            assert sum_mcint_pix[label].shape == (3, 16)
+            _assert_summary_shape(sum_mcint_pix[label], (16,))
 
     def test_partial_multi_strat(self, partial_multi_strat_large_sample):
         """Test ModelSummariserPrem integration for multi-variable participant-stratified model."""
@@ -491,17 +499,17 @@ class TestSummarizerIntegration:
         # Depixilated summary
         sum_cint = summariser.summarise_cint(return_depixilated=True)
         for label in sum_cint:
-            assert sum_cint[label].shape == (3, 81, 81)
+            _assert_summary_shape(sum_cint[label], (81, 81))
 
         sum_mcint = summariser.summarise_mcint(return_depixilated=True)
         for label in sum_mcint:
-            assert sum_mcint[label].shape == (3, 81)
+            _assert_summary_shape(sum_mcint[label], (81,))
 
         # Pixilated summary
         sum_cint_pix = summariser.summarise_cint(return_depixilated=False)
         for label in sum_cint_pix:
-            assert sum_cint_pix[label].shape == (3, 16, 16)
+            _assert_summary_shape(sum_cint_pix[label], (16, 16))
 
         sum_mcint_pix = summariser.summarise_mcint(return_depixilated=False)
         for label in sum_mcint_pix:
-            assert sum_mcint_pix[label].shape == (3, 16)
+            _assert_summary_shape(sum_mcint_pix[label], (16,))

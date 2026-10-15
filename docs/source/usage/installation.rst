@@ -107,7 +107,7 @@ After installation, open a Python session and run:
    import cntmosaic
    print(cntmosaic.__version__)
 
-If you see a version number (e.g. ``0.5.0``), the installation was successful.
+If you see a version number (e.g. ``0.5.1``), the installation was successful.
 
 ----
 
