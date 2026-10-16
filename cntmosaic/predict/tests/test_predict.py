@@ -338,6 +338,14 @@ class TestFeasibleMixingBounds:
 # ============================================================================
 
 
+# Sampler configurations whose constraints are checked
+SAMPLERS = [
+    pytest.param({}, id="truncated"),
+    pytest.param({"permute_strata": True}, id="truncated-permuted"),
+    pytest.param({"sampler": "conditioned"}, id="conditioned"),
+]
+
+
 class TestSampleEta:
 
     @pytest.fixture
@@ -356,17 +364,19 @@ class TestSampleEta:
         assert set(eta) == {f"{s}->{t}" for s in LABELS for t in LABELS}
         assert all(v.shape == (S, A, A) for v in eta.values())
 
-    def test_within_bounds(self, setup):
+    @pytest.mark.parametrize("config", SAMPLERS)
+    def test_within_bounds(self, setup, config):
         _, lb, ub = setup
-        eta = self._eta(setup)
+        eta = self._eta(setup, **config)
 
         for key, e in eta.items():
             assert np.all(e >= lb[key] - 1e-9)
             assert np.all(e <= ub[key] + 1e-9)
 
-    def test_reciprocity(self, setup):
+    @pytest.mark.parametrize("config", SAMPLERS)
+    def test_reciprocity(self, setup, config):
         z, _, _ = setup
-        eta = self._eta(setup)
+        eta = self._eta(setup, **config)
 
         for s in LABELS:
             for t in LABELS:
@@ -375,17 +385,37 @@ class TestSampleEta:
                     (z[t] * eta[f"{t}->{s}"]).transpose(0, 2, 1),
                 )
 
-    def test_sums_to_one_in_every_cell(self, setup):
+    @pytest.mark.parametrize("config", SAMPLERS)
+    def test_sums_to_one_in_every_cell(self, setup, config):
         """Fractions of each source sum to 1 over targets in every (a, b)."""
-        eta = self._eta(setup)
+        eta = self._eta(setup, **config)
 
         for s in LABELS:
             total = sum(eta[f"{s}->{t}"] for t in LABELS)
             np.testing.assert_allclose(total, 1.0, atol=1e-8)
 
-    def test_improper_prior_raises(self, setup):
+    def test_conditioned_improper_prior_raises(self, setup):
         with pytest.raises(ValueError, match="improper.*requires alpha >"):
-            self._eta(setup, alpha=0.5)
+            self._eta(setup, alpha=0.5, sampler="conditioned")
+
+    def test_truncated_accepts_small_alpha(self, setup):
+        eta = self._eta(setup, alpha=0.5)
+        assert all(np.isfinite(v).all() for v in eta.values())
+
+    @pytest.mark.parametrize("sampler, default", [("truncated_dirichlet", 1.0), ("conditioned", 2.0)])
+    def test_alpha_default_per_sampler(self, setup, sampler, default):
+        implicit = self._eta(setup, sampler=sampler)
+        explicit = self._eta(setup, sampler=sampler, alpha=default)
+
+        assert all(np.array_equal(implicit[k], explicit[k]) for k in implicit)
+
+    def test_unknown_sampler_raises(self, setup):
+        with pytest.raises(ValueError, match="Unknown sampler"):
+            self._eta(setup, sampler="metropolis")
+
+    def test_permute_with_conditioned_raises(self, setup):
+        with pytest.raises(ValueError, match="permute_strata"):
+            self._eta(setup, sampler="conditioned", permute_strata=True)
 
     def test_non_reciprocal_totals_warn(self, setup):
         z, lb, ub = setup
@@ -450,8 +480,8 @@ def test_z_marginals_totals_are_reciprocal(partial_large_sample):
     np.testing.assert_allclose(total, total.transpose(0, 2, 1), rtol=1e-4)
 
 
-def test_sample_eta_k2_matches_quadrature(monkeypatch):
-    """Mean of one cell's free value matches its exact 1-D prior density.
+def test_sample_eta_conditioned_k2_matches_quadrature(monkeypatch):
+    """Conditioned sampler: one cell's free value matches its exact 1-D density.
 
     For K = 2 and a > b, x = Z^{MF}_ab fixes the whole 2 x 2 table:
     X = [[r0 - x, x], [c0 - r0 + x, c1 - x]], and the mirror cell holds X^T.
@@ -465,7 +495,9 @@ def test_sample_eta_k2_matches_quadrature(monkeypatch):
     zF = np.array([[170.0, 40.0], [10.0, 160.0]])  # zM + zF is symmetric
     z = {"M": np.broadcast_to(zM, (n, 2, 2)), "F": np.broadcast_to(zF, (n, 2, 2))}
 
-    eta = sample_eta(z, None, None, None, alpha=alpha, rng=np.random.default_rng(0))
+    eta = sample_eta(
+        z, None, None, None, alpha=alpha, rng=np.random.default_rng(0), sampler="conditioned"
+    )
     x = eta["M->F"][:, 1, 0] * zM[1, 0]
 
     Q = np.stack([P["M"], P["F"]], axis=-1)
@@ -487,7 +519,8 @@ def test_sample_eta_k2_matches_quadrature(monkeypatch):
     assert abs(x.mean() - expected) < 4 * x.std() / np.sqrt(n)
 
 
-def test_sample_eta_k3_constraints(monkeypatch):
+@pytest.mark.parametrize("config", SAMPLERS)
+def test_sample_eta_k3_constraints(monkeypatch, config):
     rng = np.random.default_rng(0)
     labels, S3, A3 = ["a", "b", "c"], 3, 4
     Z = {}
@@ -503,7 +536,7 @@ def test_sample_eta_k3_constraints(monkeypatch):
     monkeypatch.setattr(_predict, "_compute_P_sa", lambda dataloader: P)
     lb, ub = feasible_mixing_bounds(z, return_eta=True)
 
-    eta = sample_eta(z, lb, ub, None, alpha=3.0, rng=np.random.default_rng(1))
+    eta = sample_eta(z, lb, ub, None, alpha=3.0, rng=np.random.default_rng(1), **config)
 
     for s in labels:
         np.testing.assert_allclose(sum(eta[f"{s}->{t}"] for t in labels), 1.0, atol=1e-10)
@@ -514,3 +547,47 @@ def test_sample_eta_k3_constraints(monkeypatch):
             )
             assert np.all(eta[key] >= lb[key] - 1e-9)
             assert np.all(eta[key] <= ub[key] + 1e-9)
+
+
+# Two age groups, many identical posterior draws: (a, b) = (1, 0) is one table
+K2_P = {"M": np.array([80.0, 120.0]), "F": np.array([110.0, 90.0])}
+K2_ZM = np.array([[150.0, 60.0], [90.0, 140.0]])
+K2_ZF = np.array([[170.0, 40.0], [10.0, 160.0]])  # K2_ZM + K2_ZF is symmetric
+
+
+def _k2_eta(monkeypatch, n, swap=False, **kwargs):
+    labels = ["F", "M"] if swap else ["M", "F"]
+    P = {new: K2_P[old] for new, old in zip(["M", "F"], labels)}
+    zs = {"M": K2_ZM, "F": K2_ZF}
+    z = {new: np.broadcast_to(zs[old], (n, 2, 2)) for new, old in zip(["M", "F"], labels)}
+    monkeypatch.setattr(_predict, "_compute_P_sa", lambda dataloader: P)
+    return sample_eta(z, None, None, None, **kwargs)
+
+
+def test_sample_eta_truncated_k2_is_truncated_beta(monkeypatch):
+    """The first stratum's fraction is Beta(alpha Q) truncated to its Fréchet bounds."""
+    n = 40_000
+    eta = _k2_eta(monkeypatch, n, rng=np.random.default_rng(3))
+    x = eta["M->F"][:, 1, 0]
+
+    Q = np.stack([K2_P["M"], K2_P["F"]], axis=-1)
+    Q = Q / Q.sum(axis=-1, keepdims=True)  # alpha = 1; contact age b = 0
+    r, c_M, c_F = K2_ZM[1, 0], K2_ZM[0, 1], K2_ZF[0, 1]
+    lo, hi = max(0.0, r - c_M) / r, min(r, c_F) / r
+    expected = beta(Q[0, 1], Q[0, 0]).expect(lb=lo, ub=hi, conditional=True)
+
+    assert lo - 1e-12 <= x.min() and x.max() <= hi + 1e-12
+    assert abs(x.mean() - expected) < 4 * x.std() / np.sqrt(n)
+
+
+def test_sample_eta_permuted_is_label_symmetric(monkeypatch):
+    """With permute_strata, swapping the stratum labels swaps the results."""
+    n = 40_000
+    eta = _k2_eta(monkeypatch, n, rng=np.random.default_rng(4), permute_strata=True)
+    eta_swapped = _k2_eta(
+        monkeypatch, n, swap=True, rng=np.random.default_rng(5), permute_strata=True
+    )
+
+    x, y = eta["M->F"][:, 1, 0], eta_swapped["F->M"][:, 1, 0]
+    se = np.sqrt(x.var() / n + y.var() / n)
+    assert abs(x.mean() - y.mean()) < 4 * se

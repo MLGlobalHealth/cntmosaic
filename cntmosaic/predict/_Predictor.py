@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 import numpy as np
 from numpy.typing import NDArray
@@ -46,7 +46,7 @@ class Predictor:
     Examples
     --------
     >>> predictor = Predictor(summariser, dataloader)
-    >>> cint_dict = predictor.predict_full_matrices(alpha=2.0, rng=rng)
+    >>> cint_dict = predictor.predict_full_matrices(rng=rng)
     >>> cint_dict["Male->Female"].shape   # (S, A, A)
     >>> rho = predictor.spectral_radius()
 
@@ -114,12 +114,15 @@ class Predictor:
 
     def predict_full_matrices(
         self,
-        alpha: float = 2.0,
+        alpha: Optional[float] = None,
         rng: Optional[np.random.Generator] = None,
         external_eta: Optional[Dict[str, NDArray]] = None,
         external_counts: Optional[Dict[str, NDArray]] = None,
         store_eta: bool = False,
+        n_sweeps: int = 10,
         progress: bool = True,
+        sampler: Literal["truncated_dirichlet", "conditioned"] = "truncated_dirichlet",
+        permute_strata: bool = False,
     ) -> Dict[str, NDArray]:
         """
         Sample fully stratified contact intensity matrices.
@@ -131,11 +134,12 @@ class Predictor:
 
         Parameters
         ----------
-        alpha : float, optional
-            Dirichlet precision for the associativity fraction prior
-            (default 2.0).  Higher values pull samples toward the
-            population-proportion prior.  Must be large enough for the
-            prior to be proper; see :func:`sample_eta`.
+        alpha : float or None, optional
+            Dirichlet precision for the associativity fraction prior.
+            Higher values pull samples toward the population-proportion
+            prior.  If ``None`` (default), 1.0 for the truncated Dirichlet
+            sampler and 2.0 for the conditioned sampler, which needs a large
+            enough ``alpha`` to be proper; see :func:`sample_eta`.
         rng : numpy.random.Generator or None, optional
             Random number generator.  If ``None``, a new generator is created.
         external_eta : Dict[str, NDArray] or None, optional
@@ -151,9 +155,21 @@ class Predictor:
             matrices: K² arrays of shape ``(S, A, A)``.  Every call replaces
             the stored fractions, or clears them when ``store_eta=False``,
             so they always correspond to the most recent prediction.
+        n_sweeps : int, optional
+            Number of MCMC sweeps used to sample the associativity fractions
+            (default 10).  Used by the conditioned sampler, and by the
+            truncated Dirichlet sampler only when there are three or more
+            strata (with two strata its draws are exact).  Runtime grows
+            linearly with ``n_sweeps``.
         progress : bool, optional
             Show a progress bar while the associativity fractions are
             sampled, the slowest step (default ``True``).
+        sampler : {"truncated_dirichlet", "conditioned"}, optional
+            Prior and sampler for the associativity fractions (default
+            ``"truncated_dirichlet"``); see :func:`sample_eta`.
+        permute_strata : bool, optional
+            Fill strata in a random order per posterior draw (default
+            ``False``).  Only for the truncated Dirichlet sampler.
 
         Returns
         -------
@@ -174,7 +190,10 @@ class Predictor:
             external_eta=external_eta,
             external_counts=external_counts,
             rng=rng,
+            n_sweeps=n_sweeps,
             progress=progress,
+            sampler=sampler,
+            permute_strata=permute_strata,
         )
         sample_cint = self.summariser.get_posterior_samples("cint")
         strata = self.strata
@@ -191,10 +210,13 @@ class Predictor:
     def spectral_radius(
         self,
         method: str = "generalised",
-        alpha: float = 2.0,
+        alpha: Optional[float] = None,
         rng: Optional[np.random.Generator] = None,
         store_eta: bool = False,
+        n_sweeps: int = 10,
         progress: bool = True,
+        sampler: Literal["truncated_dirichlet", "conditioned"] = "truncated_dirichlet",
+        permute_strata: bool = False,
     ) -> Union[float, NDArray]:
         """
         Compute the spectral radius of the predicted fully stratified matrices.
@@ -208,15 +230,21 @@ class Predictor:
         ----------
         method : {"generalised", "age"}, optional
             Spectral radius method (default ``"generalised"``).
-        alpha : float, optional
+        alpha : float or None, optional
             Dirichlet precision passed to :meth:`predict_full_matrices`
-            (default 2.0).
+            (default ``None``, the sampler's default).
         rng : numpy.random.Generator or None, optional
             Random number generator passed to :meth:`predict_full_matrices`.
         store_eta : bool, optional
             Passed to :meth:`predict_full_matrices` (default ``False``).
+        n_sweeps : int, optional
+            Passed to :meth:`predict_full_matrices` (default 10).
         progress : bool, optional
             Passed to :meth:`predict_full_matrices` (default ``True``).
+        sampler : {"truncated_dirichlet", "conditioned"}, optional
+            Passed to :meth:`predict_full_matrices`.
+        permute_strata : bool, optional
+            Passed to :meth:`predict_full_matrices` (default ``False``).
 
         Returns
         -------
@@ -225,7 +253,13 @@ class Predictor:
             posterior sample matrices.
         """
         matrices = self.predict_full_matrices(
-            alpha=alpha, rng=rng, store_eta=store_eta, progress=progress
+            alpha=alpha,
+            rng=rng,
+            store_eta=store_eta,
+            n_sweeps=n_sweeps,
+            progress=progress,
+            sampler=sampler,
+            permute_strata=permute_strata,
         )
         return _spectral_radius_fn(matrices, self.dataloader, method=method)
 

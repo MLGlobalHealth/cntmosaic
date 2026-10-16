@@ -387,143 +387,195 @@ def _slice_step(
     rng : numpy.random.Generator
         Random number generator.
     max_shrink : int, optional
-        Maximum number of shrinkage steps (default 100).
+        Maximum number of shrinkage steps (default 100).  Chains that do not
+        accept within this many steps keep ``d = 0``.
 
     Returns
     -------
     np.ndarray
         Step ``d`` of shape ``base.shape[:-1]``; 0 where the move has no room.
     """
+    # Flatten the chains so finished ones can be dropped from later iterations
+    shape, m = base.shape[:-1], base.shape[-1]
+    base = base.reshape(-1, m)
+    weight = np.broadcast_to(weight, shape + (m,)).reshape(-1, m)
     lo = np.max(np.where(sign > 0, -base, -np.inf), axis=-1)
     hi = np.min(np.where(sign < 0, base, np.inf), axis=-1)
 
-    def log_density(d):
+    def log_density(b, w, d):
         with np.errstate(divide="ignore", invalid="ignore"):
-            terms = weight * np.log(base + sign * d[..., np.newaxis])
-        return np.sum(np.where(weight == 0, 0.0, terms), axis=-1)
+            terms = w * np.log(b + sign * d[:, np.newaxis])
+            return np.sum(np.where(w == 0, 0.0, terms), axis=-1)
 
-    todo = hi > lo
     d = np.zeros(lo.shape)
-    y = np.where(todo, log_density(d), 0.0) - rng.exponential(size=d.shape)
-    left = np.where(todo, lo, 0.0)
-    right = np.where(todo, hi, 0.0)
+    y = log_density(base, weight, d) - rng.exponential(size=d.shape)
+
+    # Shrink only the chains that have not yet accepted a proposal; almost
+    # all accept on the first try, so later iterations touch few chains
+    idx = np.flatnonzero(hi > lo)
+    left, right = lo[idx], hi[idx]
     for _ in range(max_shrink):
-        if not todo.any():
+        if idx.size == 0:
             break
-        prop = left + (right - left) * rng.uniform(size=d.shape)
-        ok = todo & (log_density(prop) > y)
-        d = np.where(ok, prop, d)
-        todo &= ~ok
-        below = todo & (prop < 0)
+        prop = left + (right - left) * rng.uniform(size=idx.size)
+        ok = log_density(base[idx], weight[idx], prop) > y[idx]
+        d[idx[ok]] = prop[ok]
+        keep = ~ok
+        idx, prop, left, right = idx[keep], prop[keep], left[keep], right[keep]
+        below = prop < 0
         left = np.where(below, prop, left)
-        right = np.where(todo & ~below, prop, right)
-    return d
+        right = np.where(below, right, prop)
+    return d.reshape(shape)
 
+def _put_rows(table: np.ndarray, rows: np.ndarray, values: np.ndarray) -> None:
+    """Write ``values`` into row ``rows[s]`` of ``table[s, j]`` for every s, j.
 
-def sample_eta(
-    z_marg: Dict[str, np.ndarray],
-    eta_lb: Dict[str, np.ndarray],
-    eta_ub: Dict[str, np.ndarray],
-    dataloader: ContactSurveyLoader,
-    alpha: float = 2.0,
-    external_eta: Dict[str, np.ndarray] | None = None,
-    external_counts: Dict[str, np.ndarray] | None = None,
-    rng: np.random.Generator | None = None,
-    n_sweeps: int = 20,
-    progress: bool = False,
-) -> Dict[str, np.ndarray]:
+    ``table`` has shape ``(S, n, K, K)``, ``rows`` shape ``(S,)`` and ``values``
+    shape ``(S, n, K)``.
     """
-    Sample associativity fractions satisfying reciprocity and sum-to-one.
+    idx = np.broadcast_to(rows[:, None, None, None], table.shape[:2] + (1, table.shape[3]))
+    np.put_along_axis(table, idx, values[:, :, None, :], axis=2)
 
-    The fully stratified counts are ``Z^{st}_ab = z^s_ab * eta^{st}_ab``.
-    They must satisfy, exactly,
 
-    - reciprocity: ``Z^{st}_ab = Z^{ts}_ba``, and
-    - sum-to-one: ``sum_t eta^{st}_ab = 1`` in every cell.
-
-    Both constraints only link a cell ``(a, b)`` with its mirror ``(b, a)``.
-    For ``a > b`` the counts ``X[s, t] = Z^{st}_ab`` form a K x K table whose
-    row sums are ``z^s_ab`` and whose column sums are ``z^t_ba``; the mirror
-    cell holds ``X^T``.  On the diagonal ``X`` is symmetric with row sums
-    ``z^s_aa``.  Every non-negative table with these sums satisfies both
-    constraints, and its entries lie within the Fréchet bounds.
-
-    The prior is a Dirichlet on each source's fractions at both cells of a
-    pair, with concentration ``alpha * Q^t_b`` (the target stratum's
-    population share at the contact age) plus any external terms,
-    restricted to valid tables.  Tables are sampled by MCMC: starting from
-    the independence table, each sweep applies every margin-preserving 2 x 2
-    swap move (symmetric moves on the diagonal), drawing each step by slice
-    sampling.  Every (posterior sample, age pair) runs its own chain.
+def _sample_eta_truncated(
+    r: np.ndarray,
+    c: np.ndarray,
+    rd: np.ndarray,
+    conc_off: np.ndarray,
+    conc_diag: np.ndarray,
+    order: np.ndarray,
+    rng: np.random.Generator,
+    n_sweeps: int,
+    progress: bool,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Fill each table row by row with truncated Dirichlet draws.
 
     Parameters
     ----------
-    z_marg : Dict[str, np.ndarray]
-        Dictionary mapping stratum labels to partially stratified contact
-        count arrays of shape ``(S, A, A)`` (output of :func:`z_marginals`).
-        The totals ``sum_s z^s_ab`` must be reciprocal in ``(a, b)``.
-    eta_lb : Dict[str, np.ndarray]
-        Lower Fréchet bounds for each ``"source->target"`` pair.  Not used:
-        the table constraints imply them.  Kept for backward compatibility.
-    eta_ub : Dict[str, np.ndarray]
-        Upper Fréchet bounds for each ``"source->target"`` pair.  Not used,
-        as for ``eta_lb``.
-    dataloader : ContactSurveyLoader
-        An instantiated ContactSurveyLoader.  Used to extract stratified
-        population sizes via ``_compute_P_sa`` for the Dirichlet concentration.
-    alpha : float, optional
-        Dirichlet precision (default 2.0).  The concentration of source s on
-        target t at cell ``(a, b)`` is ``alpha * Q^t_b``.  Because reciprocity
-        ties ``eta^{st}_ab`` to ``eta^{ts}_ba``, the prior is only proper when
-        the two concentrations sum to more than 1 for every such pair; a
-        ``ValueError`` reports the minimum ``alpha`` otherwise.
-    external_eta : Dict[str, np.ndarray] or None, optional
-        External associativity fractions to add to the concentration,
-        shape ``(A, A)`` per ``"source->target"`` key.  If ``None``, ignored.
-    external_counts : Dict[str, np.ndarray] or None, optional
-        External contact counts to add to the concentration,
-        shape ``(A, A)`` per ``"source->target"`` key.  If ``None``, ignored.
-    rng : numpy.random.Generator or None, optional
-        Random number generator.  If ``None``, a new generator is created.
-    n_sweeps : int, optional
-        Number of MCMC sweeps (default 20).  Each sweep makes
-        ``(K choose 2)^2`` slice updates per off-diagonal age pair.
-    progress : bool, optional
-        Show a tqdm progress bar over the MCMC moves (default False).
+    r, c : np.ndarray
+        Row and column sums of the off-diagonal tables, shape ``(S, n, K)``.
+    rd : np.ndarray
+        Row sums of the symmetric diagonal tables, shape ``(S, A, K)``.
+    conc_off : np.ndarray
+        Concentration ``conc_off[j, k, l]`` of source k on target l at
+        off-diagonal pair j, shape ``(n, K, K)``.
+    conc_diag : np.ndarray
+        Concentration at the diagonal cells, shape ``(A, K, K)``.
+    order : np.ndarray
+        Order in which the source strata are filled, one permutation per
+        posterior draw, shape ``(S, K)``.
+    rng, n_sweeps, progress
+        As in :func:`sample_eta`.
 
     Returns
     -------
-    Dict[str, np.ndarray]
-        Dictionary mapping ``"source->target"`` labels to associativity
-        fraction arrays of shape ``(S, A, A)``.  Cells where a source has no
-        contacts (``z^s_ab = 0``) are set to 0.
+    Tuple[np.ndarray, np.ndarray]
+        Off-diagonal tables ``(S, n, K, K)`` and diagonal tables ``(S, A, K, K)``.
+    """
+    S, n, K = r.shape
+    A = rd.shape[1]
+
+    def draw(alpha_row, cap, total):
+        """Truncated Dirichlet draw of ``total`` split under capacities ``cap``."""
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ub = np.where(total[..., None] > 0, np.clip(cap / total[..., None], 0.0, 1.0), 1.0)
+        frac = rtruncated_dirichlet(alpha_row, 0.0, ub, rng=rng, n_sweeps=n_sweeps)
+        return np.minimum(total[..., None] * frac, cap)
+
+    X = np.zeros((S, n, K, K))
+    Xd = np.zeros((S, A, K, K))
+    with tqdm(total=2 * (K - 1), desc="Sampling eta", disable=not progress) as pbar:
+        # Off-diagonal pairs: source rows under the remaining column capacities;
+        # the last source takes whatever capacity is left.
+        cap = c.copy()
+        for i in range(K - 1):
+            k = order[:, i]
+            r_k = np.take_along_axis(r, k[:, None, None], axis=2)[..., 0]  # (S, n)
+            alpha_row = conc_off[:, k, :].transpose(1, 0, 2)  # (S, n, K)
+            x_row = draw(alpha_row, cap, r_k)
+            _put_rows(X, k, x_row)
+            cap = np.maximum(cap - x_row, 0.0)
+            pbar.update(1)
+        _put_rows(X, order[:, K - 1], cap)
+
+        # Diagonal cells: symmetric tables. Source k's free targets are the strata
+        # not filled yet; the rest of its row is fixed by symmetry.
+        rem = rd.copy()
+        for i in range(K - 1):
+            k = order[:, i]
+            free = order[:, i:]  # (S, K - i), free[:, 0] == k
+            r_k = np.take_along_axis(rem, k[:, None, None], axis=2)[..., 0]  # (S, A)
+            alpha_sub = np.take_along_axis(
+                conc_diag[:, k, :].transpose(1, 0, 2), free[:, None, :], axis=2
+            )
+            cap_sub = np.take_along_axis(rem, free[:, None, :], axis=2)
+            x_sub = draw(alpha_sub, cap_sub, r_k)
+            for j in range(K - i):
+                t = free[:, j]
+                Xd[np.arange(S)[:, None], np.arange(A)[None, :], k[:, None], t[:, None]] = x_sub[..., j]
+                Xd[np.arange(S)[:, None], np.arange(A)[None, :], t[:, None], k[:, None]] = x_sub[..., j]
+            # Source k's row is complete; other strata lose what they gave to k
+            used = x_sub.copy()
+            used[..., 0] = r_k
+            np.put_along_axis(rem, free[:, None, :], np.maximum(cap_sub - used, 0.0), axis=2)
+            pbar.update(1)
+        last = order[:, K - 1]
+        Xd[np.arange(S)[:, None], np.arange(A)[None, :], last[:, None], last[:, None]] = (
+            np.take_along_axis(rem, last[:, None, None], axis=2)[..., 0]
+        )
+
+    return X, Xd
+
+
+def _sample_eta_conditioned(
+    r: np.ndarray,
+    c: np.ndarray,
+    rd: np.ndarray,
+    conc: np.ndarray,
+    Q: np.ndarray,
+    alpha: float,
+    ia: np.ndarray,
+    ib: np.ndarray,
+    rng: np.random.Generator,
+    n_sweeps: int,
+    progress: bool,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Slice-within-Gibbs sampler for the reciprocity-conditioned prior.
+
+    The prior is the product of the per-cell Dirichlet densities at both
+    cells of an age pair, conditioned on reciprocity, which gives
+    ``p(X) ∝ prod X[s,t]^(conc_ab[s,t] + conc_ba[t,s] - 2)`` on tables with
+    fixed margins.  Tables are updated by margin-preserving 2 x 2 swap moves
+    (symmetric moves on the diagonal), each step drawn by shrinkage slice
+    sampling.  See ``docs/dev_docs/sample_eta_sampler.tex``.
+
+    Parameters
+    ----------
+    r, c, rd : np.ndarray
+        Table margins, as in :func:`_sample_eta_truncated`.
+    conc : np.ndarray
+        Concentration ``conc[s, t, a, b]``, shape ``(K, K, A, A)``.
+    Q : np.ndarray
+        Population shares ``Q[age, stratum]``, used in the error message.
+    alpha : float
+        Dirichlet precision, used in the error message.
+    ia, ib : np.ndarray
+        Ages of the off-diagonal pairs (a > b).
+    rng, n_sweeps, progress
+        As in :func:`sample_eta`.
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray]
+        Off-diagonal tables ``(S, n, K, K)`` and diagonal tables ``(S, A, K, K)``.
 
     Raises
     ------
     ValueError
         If the prior is improper for the given concentrations.
     """
-    if rng is None:
-        rng = np.random.default_rng()
-
-    strata_names = list(z_marg.keys())
-    K = len(strata_names)
-    zm = np.stack([np.asarray(z_marg[s], dtype=float) for s in strata_names], axis=1)
-    S, _, A, _ = zm.shape  # (S, K, A, A)
-
-    # Concentration conc[s, t, a, b] of source s on target t at cell (a, b)
-    P_sa = _compute_P_sa(dataloader)
-    Pt = np.stack([P_sa[t] for t in strata_names], axis=-1)  # (A, K)
-    Q = Pt / Pt.sum(axis=-1, keepdims=True)
-    conc = np.broadcast_to(alpha * Q.T[np.newaxis, :, np.newaxis, :], (K, K, A, A)).copy()
-    for ext in (external_eta, external_counts):
-        if ext is not None:
-            conc += np.stack(
-                [np.stack([ext[f"{s}->{t}"] for t in strata_names]) for s in strata_names]
-            )
-
-    ia, ib = np.tril_indices(A, k=-1)  # off-diagonal pairs, a > b
-    dg = np.arange(A)
+    K = conc.shape[0]
+    dg = np.arange(conc.shape[2])
 
     # Exponents of each table entry in the log density
     e_off = (conc[:, :, ia, ib] - 1).transpose(2, 0, 1) + (
@@ -552,23 +604,10 @@ def sample_eta(
             f"terms this requires alpha > {1 / Q_pair.min():.3f}."
         )
 
-    # Table margins; rescale column sums so both margins share one total
-    r = zm[:, :, ia, ib].transpose(0, 2, 1)  # (S, n, K) row sums z^s_ab
-    c = zm[:, :, ib, ia].transpose(0, 2, 1)  # (S, n, K) column sums z^t_ba
-    r_tot, c_tot = r.sum(axis=-1), c.sum(axis=-1)
+    # Start from the independence tables, which lie strictly inside the bounds
     with np.errstate(divide="ignore", invalid="ignore"):
-        asym = np.abs(r_tot - c_tot) / np.maximum(r_tot, c_tot)
-        if np.nanmax(asym, initial=0.0) > 1e-3:
-            warnings.warn(
-                "Total contact counts are not reciprocal (max relative asymmetry "
-                f"{np.nanmax(asym):.2e}); column sums are rescaled to match.",
-                UserWarning,
-                stacklevel=2,
-            )
-        c = c * np.nan_to_num(r_tot / c_tot, nan=1.0)[..., np.newaxis]
+        r_tot = r.sum(axis=-1)
         X = np.nan_to_num(r[..., :, np.newaxis] * c[..., np.newaxis, :] / r_tot[..., np.newaxis, np.newaxis])
-
-        rd = zm[:, :, dg, dg].transpose(0, 2, 1)  # (S, A, K)
         rd_tot = rd.sum(axis=-1)
         Xd = np.nan_to_num(rd[..., :, np.newaxis] * rd[..., np.newaxis, :] / rd_tot[..., np.newaxis, np.newaxis])
 
@@ -601,6 +640,182 @@ def sample_eta(
                 Xd[..., s, s] -= d
                 Xd[..., t, t] -= d
                 pbar.update(1)
+
+    return X, Xd
+
+
+def sample_eta(
+    z_marg: Dict[str, np.ndarray],
+    eta_lb: Dict[str, np.ndarray],
+    eta_ub: Dict[str, np.ndarray],
+    dataloader: ContactSurveyLoader,
+    alpha: Optional[float] = None,
+    external_eta: Dict[str, np.ndarray] | None = None,
+    external_counts: Dict[str, np.ndarray] | None = None,
+    rng: np.random.Generator | None = None,
+    n_sweeps: int = 10,
+    progress: bool = False,
+    sampler: Literal["truncated_dirichlet", "conditioned"] = "truncated_dirichlet",
+    permute_strata: bool = False,
+) -> Dict[str, np.ndarray]:
+    """
+    Sample associativity fractions satisfying reciprocity and sum-to-one.
+
+    The fully stratified counts are ``Z^{st}_ab = z^s_ab * eta^{st}_ab``.
+    They must satisfy, exactly,
+
+    - reciprocity: ``Z^{st}_ab = Z^{ts}_ba``, and
+    - sum-to-one: ``sum_t eta^{st}_ab = 1`` in every cell.
+
+    Both constraints only link a cell ``(a, b)`` with its mirror ``(b, a)``.
+    For ``a > b`` the counts ``X[s, t] = Z^{st}_ab`` form a K x K table whose
+    row sums are ``z^s_ab`` and whose column sums are ``z^t_ba``; the mirror
+    cell holds ``X^T``.  On the diagonal ``X`` is symmetric with row sums
+    ``z^s_aa``.  Every non-negative table with these sums satisfies both
+    constraints, and its entries lie within the Fréchet bounds.  Two samplers
+    of such tables are available:
+
+    ``"truncated_dirichlet"`` (default)
+        The table is filled one source stratum (row) at a time.  Each row's
+        fractions are drawn from a Dirichlet with concentration
+        ``alpha * Q^t_b`` (plus external terms), truncated so that the row
+        fits within the column capacity left by earlier rows; the last
+        stratum takes what remains.  On the diagonal each row's free entries
+        are those not already fixed by symmetry.  For K = 2 this is one exact
+        truncated Beta draw per age pair, whose bounds are the Fréchet bounds
+        of the first stratum.  The prior is proper for any ``alpha > 0``, but
+        depends on the order in which strata are filled: only those filled
+        first carry a truncated Dirichlet prior.  ``permute_strata=True`` draws
+        a random order per posterior draw, making the prior symmetric on
+        average.
+    ``"conditioned"``
+        The per-cell Dirichlet at both cells of a pair, conditioned on
+        reciprocity, sampled by slice-within-Gibbs MCMC (see
+        ``docs/dev_docs/sample_eta_sampler.tex``).  Symmetric in strata and
+        cells, but approximate for a finite ``n_sweeps``, and only proper for
+        large enough ``alpha``.
+
+    Parameters
+    ----------
+    z_marg : Dict[str, np.ndarray]
+        Dictionary mapping stratum labels to partially stratified contact
+        count arrays of shape ``(S, A, A)`` (output of :func:`z_marginals`).
+        The totals ``sum_s z^s_ab`` must be reciprocal in ``(a, b)``.
+    eta_lb : Dict[str, np.ndarray]
+        Lower Fréchet bounds for each ``"source->target"`` pair.  Not used:
+        the table constraints imply them.  Kept for backward compatibility.
+    eta_ub : Dict[str, np.ndarray]
+        Upper Fréchet bounds for each ``"source->target"`` pair.  Not used,
+        as for ``eta_lb``.
+    dataloader : ContactSurveyLoader
+        An instantiated ContactSurveyLoader.  Used to extract stratified
+        population sizes via ``_compute_P_sa`` for the Dirichlet concentration.
+    alpha : float or None, optional
+        Dirichlet precision.  The concentration of source s on target t at
+        cell ``(a, b)`` is ``alpha * Q^t_b``.  If ``None`` (default), 1.0 for
+        ``"truncated_dirichlet"`` and 2.0 for ``"conditioned"``, whose prior
+        is only proper when ``alpha * (Q^t_b + Q^s_a) > 1``.
+    external_eta : Dict[str, np.ndarray] or None, optional
+        External associativity fractions to add to the concentration,
+        shape ``(A, A)`` per ``"source->target"`` key.  If ``None``, ignored.
+    external_counts : Dict[str, np.ndarray] or None, optional
+        External contact counts to add to the concentration,
+        shape ``(A, A)`` per ``"source->target"`` key.  If ``None``, ignored.
+    rng : numpy.random.Generator or None, optional
+        Random number generator.  If ``None``, a new generator is created.
+    n_sweeps : int, optional
+        Number of MCMC sweeps (default 10).  Used by ``"conditioned"``, and by
+        ``"truncated_dirichlet"`` only for K >= 3 (K = 2 draws are exact).
+    progress : bool, optional
+        Show a tqdm progress bar (default False).
+    sampler : {"truncated_dirichlet", "conditioned"}, optional
+        Which sampler to use (default ``"truncated_dirichlet"``).
+    permute_strata : bool, optional
+        Fill strata in a random order, drawn per posterior draw (default
+        False).  Only for ``"truncated_dirichlet"``.
+
+    Returns
+    -------
+    Dict[str, np.ndarray]
+        Dictionary mapping ``"source->target"`` labels to associativity
+        fraction arrays of shape ``(S, A, A)``.  Cells where a source has no
+        contacts (``z^s_ab = 0``) are set to 0.
+
+    Raises
+    ------
+    ValueError
+        If ``sampler`` is unknown, if ``permute_strata`` is used with
+        ``"conditioned"``, or if the conditioned prior is improper.
+    """
+    if sampler not in ("truncated_dirichlet", "conditioned"):
+        raise ValueError(
+            f"Unknown sampler {sampler!r}; use 'truncated_dirichlet' or 'conditioned'."
+        )
+    if permute_strata and sampler == "conditioned":
+        raise ValueError(
+            "permute_strata only applies to sampler='truncated_dirichlet'; the "
+            "conditioned prior is already symmetric in the strata."
+        )
+    if alpha is None:
+        alpha = 1.0 if sampler == "truncated_dirichlet" else 2.0
+    if rng is None:
+        rng = np.random.default_rng()
+
+    strata_names = list(z_marg.keys())
+    K = len(strata_names)
+    zm = np.stack([np.asarray(z_marg[s], dtype=float) for s in strata_names], axis=1)
+    S, _, A, _ = zm.shape  # (S, K, A, A)
+
+    # Concentration conc[s, t, a, b] of source s on target t at cell (a, b)
+    P_sa = _compute_P_sa(dataloader)
+    Pt = np.stack([P_sa[t] for t in strata_names], axis=-1)  # (A, K)
+    Q = Pt / Pt.sum(axis=-1, keepdims=True)
+    conc = np.broadcast_to(alpha * Q.T[np.newaxis, :, np.newaxis, :], (K, K, A, A)).copy()
+    for ext in (external_eta, external_counts):
+        if ext is not None:
+            conc += np.stack(
+                [np.stack([ext[f"{s}->{t}"] for t in strata_names]) for s in strata_names]
+            )
+
+    ia, ib = np.tril_indices(A, k=-1)  # off-diagonal pairs, a > b
+    dg = np.arange(A)
+
+    # Table margins; rescale column sums so both margins share one total
+    r = zm[:, :, ia, ib].transpose(0, 2, 1)  # (S, n, K) row sums z^s_ab
+    c = zm[:, :, ib, ia].transpose(0, 2, 1)  # (S, n, K) column sums z^t_ba
+    rd = zm[:, :, dg, dg].transpose(0, 2, 1)  # (S, A, K)
+    r_tot, c_tot = r.sum(axis=-1), c.sum(axis=-1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        asym = np.abs(r_tot - c_tot) / np.maximum(r_tot, c_tot)
+        if np.nanmax(asym, initial=0.0) > 1e-3:
+            warnings.warn(
+                "Total contact counts are not reciprocal (max relative asymmetry "
+                f"{np.nanmax(asym):.2e}); column sums are rescaled to match.",
+                UserWarning,
+                stacklevel=2,
+            )
+        c = c * np.nan_to_num(r_tot / c_tot, nan=1.0)[..., np.newaxis]
+
+    if sampler == "truncated_dirichlet":
+        if permute_strata:
+            order = np.argsort(rng.random((S, K)), axis=1)
+        else:
+            order = np.broadcast_to(np.arange(K), (S, K))
+        X, Xd = _sample_eta_truncated(
+            r,
+            c,
+            rd,
+            conc[:, :, ia, ib].transpose(2, 0, 1),
+            conc[:, :, dg, dg].transpose(2, 0, 1),
+            order,
+            rng,
+            n_sweeps,
+            progress,
+        )
+    else:
+        X, Xd = _sample_eta_conditioned(
+            r, c, rd, conc, Q, alpha, ia, ib, rng, n_sweeps, progress
+        )
 
     eta = np.zeros((S, K, K, A, A))
     with np.errstate(divide="ignore", invalid="ignore"):
