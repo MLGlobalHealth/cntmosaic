@@ -1,0 +1,599 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage[round,authoryear]{natbib}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+
+\newtheorem{proposition}{Proposition}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{example}{Example}
+\theoremstyle{remark}
+\newtheorem*{remark}{Remark}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\T}{\mathcal{T}}
+\newcommand{\ind}{\mathbf{1}}
+\DeclareMathOperator{\Dir}{Dirichlet}
+\DeclareMathOperator{\Gam}{Gamma}
+\DeclareMathOperator{\Unif}{Uniform}
+\DeclareMathOperator{\Expo}{Exponential}
+
+\title{Sampling associativity fractions in \texttt{cntmosaic}:\\
+a slice-within-Gibbs sampler on contingency tables}
+\author{\texttt{cntmosaic} development notes}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+This note explains how the function \texttt{sample\_eta} in \texttt{cntmosaic.predict} turns contact
+counts that are known only by participant group into counts broken down by
+both participant group and contact group. The method rests on one observation:
+the two rules every valid answer must obey, \emph{reciprocity} and
+\emph{sum-to-one}, turn each pair of age cells into a small table with known
+row and column totals. We put a prior on such tables and sample from it with
+a Markov chain Monte Carlo (MCMC) method that combines the classic
+``swap'' moves for tables with fixed totals and the slice sampler of
+\citet{neal2003slice}. Every step is explained from first principles.
+\end{abstract}
+
+\tableofcontents
+
+%==============================================================================
+\section{The problem}
+\label{sec:problem}
+%==============================================================================
+
+\subsection{What we know and what we want}
+
+People are split into $K$ groups, called \emph{strata} (for example
+$K=2$: male and female), and into $A$ age groups. We write
+$k,\ell \in \{1,\dots,K\}$ for strata and $a,b \in \{1,\dots,A\}$ for ages.
+Throughout, $a$ is the age of the person \emph{reporting} the contact (the
+participant) and $b$ the age of the person \emph{contacted}.
+
+A partially stratified model, fitted to survey data where only the
+participant's stratum is recorded, tells us
+\begin{equation}
+  z^{k}_{ab} = \text{total contacts from participants in stratum } k
+  \text{ aged } a \text{ to people aged } b \text{ (any stratum)}.
+\end{equation}
+We want the finer quantity
+\begin{equation}
+  Z^{k\ell}_{ab} = \text{contacts from stratum } k \text{, age } a
+  \text{, to stratum } \ell \text{, age } b,
+\end{equation}
+or equivalently the \emph{associativity fractions}
+\begin{equation}
+  \eta^{k\ell}_{ab} = \frac{Z^{k\ell}_{ab}}{z^{k}_{ab}},
+\end{equation}
+the share of stratum-$k$ participants' contacts (at ages $a \to b$) that go
+to stratum $\ell$. In practice everything below is done separately for
+each posterior draw of $z$; we drop the draw index to keep notation light.
+
+\subsection{The rules a valid answer must obey}
+
+\begin{enumerate}
+  \item[(C1)] \textbf{Non-negativity:} $Z^{k\ell}_{ab} \ge 0$.
+  \item[(C2)] \textbf{Sum-to-one:} the fine counts must add back up to what we
+        know,
+        \begin{equation}
+          \sum_{\ell=1}^{K} Z^{k\ell}_{ab} = z^{k}_{ab}
+          \quad\Longleftrightarrow\quad
+          \sum_{\ell=1}^{K} \eta^{k\ell}_{ab} = 1 .
+        \end{equation}
+  \item[(C3)] \textbf{Reciprocity:} every contact has two ends. A contact
+        from (stratum $k$, age $a$) to (stratum $\ell$, age $b$) is the same
+        event as a contact from ($\ell$, $b$) to ($k$, $a$), so
+        \begin{equation}
+          Z^{k\ell}_{ab} = Z^{\ell k}_{ba}.
+        \end{equation}
+        Reciprocity is a standard requirement for contact matrices
+        \citep{wallinga2006using,arregui2018projecting}.
+\end{enumerate}
+
+Summing (C3) over $k$ and $\ell$ and using (C2) shows that the known totals
+must themselves be reciprocal:
+\begin{equation}
+  \label{eq:consistency}
+  \sum_{k} z^{k}_{ab} = \sum_{k} z^{k}_{ba}.
+\end{equation}
+If \eqref{eq:consistency} fails, no answer satisfies (C1)--(C3). The
+partially stratified models in \texttt{cntmosaic} satisfy it; the code warns
+and rescales if the input is slightly off.
+
+%==============================================================================
+\section{The key observation: one small table per age pair}
+\label{sec:tables}
+%==============================================================================
+
+Rules (C2) and (C3) only ever link a cell $(a,b)$ with its \emph{mirror}
+cell $(b,a)$. So we can treat each pair of mirror cells on its own.
+
+\subsection{Off-diagonal pairs ($a>b$)}
+
+Fix $a > b$ and collect the unknown counts at $(a,b)$ in a $K\times K$
+table $X$:
+\begin{equation}
+  X_{k\ell} = Z^{k\ell}_{ab}.
+\end{equation}
+\begin{itemize}
+  \item By (C2) at $(a,b)$, the \textbf{row sums} of $X$ are known:
+        $\sum_{\ell} X_{k\ell} = z^{k}_{ab} =: r_k$.
+  \item By (C3), $X_{k\ell} = Z^{\ell k}_{ba}$, so the counts at the mirror
+        cell are just the \textbf{transpose} $X^{\top}$.
+  \item By (C2) at $(b,a)$, the rows of $X^{\top}$, i.e.\ the
+        \textbf{column sums} of $X$, are known:
+        $\sum_{k} X_{k\ell} = z^{\ell}_{ba} =: c_\ell$.
+\end{itemize}
+Condition \eqref{eq:consistency} says exactly that the row totals and the
+column totals have the same grand total $N := \sum_k r_k = \sum_\ell c_\ell$.
+
+\begin{definition}[Tables with fixed margins]
+For non-negative vectors $\bm r, \bm c \in \R^{K}$ with the same total $N$,
+\begin{equation}
+  \T(\bm r,\bm c) = \Bigl\{ X \in \R^{K\times K} :
+    X_{k\ell} \ge 0,\;
+    \textstyle\sum_{\ell} X_{k\ell} = r_k,\;
+    \sum_{k} X_{k\ell} = c_\ell \Bigr\}.
+\end{equation}
+This set is called a \emph{transportation polytope}.
+\end{definition}
+
+\begin{proposition}
+\label{prop:equiv}
+For a pair $a>b$, the counts at $(a,b)$ and $(b,a)$ satisfy (C1)--(C3) if and
+only if $X \in \T(\bm r,\bm c)$ and the counts at $(b,a)$ equal $X^{\top}$.
+\end{proposition}
+\begin{proof}
+This is the bullet list above read in both directions.
+\end{proof}
+
+So \emph{every} table in $\T(\bm r,\bm c)$ is a valid answer, and both
+constraints hold exactly, by construction. Each entry automatically lies in
+the classical Fr\'echet--Hoeffding bounds
+\citep{hoeffding1940masstabinvariante,frechet1951tableaux}:
+\begin{equation}
+  \max(0,\; r_k + c_\ell - N) \;\le\; X_{k\ell} \;\le\; \min(r_k,\; c_\ell).
+\end{equation}
+
+\subsection{Diagonal cells ($a=b$)}
+
+When $a=b$ the cell is its own mirror, so (C3) says $X_{k\ell} = X_{\ell k}$:
+the table is \textbf{symmetric}, with row sums (and hence column sums)
+$r_k = z^{k}_{aa}$.
+
+\subsection{How much freedom is left?}
+
+A $K\times K$ table with fixed row and column sums has $(K-1)^2$ free
+entries; a symmetric one with fixed row sums has $K(K-1)/2$. For $K=2$ both
+numbers are $1$: \emph{a single number decides everything}.
+
+\begin{example}[$K=2$]
+\label{ex:k2}
+Let $x = X_{12}$ (stratum 1 to stratum 2). The margins fix the rest:
+\begin{equation}
+  X = \begin{pmatrix} r_1 - x & x \\ c_1 - r_1 + x & c_2 - x \end{pmatrix},
+  \qquad
+  x \in \bigl[\max(0,\, r_1 - c_1),\; \min(r_1,\, c_2)\bigr].
+\end{equation}
+Check: row 1 sums to $r_1$, column 1 to $c_1$, column 2 to $c_2$, and row 2
+to $c_1 + c_2 - r_1 = r_2$ because the totals agree.
+\end{example}
+
+%==============================================================================
+\section{The prior on tables}
+\label{sec:prior}
+%==============================================================================
+
+\subsection{Starting point: one Dirichlet per source and cell}
+
+Before imposing reciprocity, a natural prior treats the fractions of each
+source stratum $k$ at each cell as a Dirichlet vector
+\citep[see e.g.][]{ng2011dirichlet}:
+\begin{equation}
+  \bigl(\eta^{k1}_{ab},\dots,\eta^{kK}_{ab}\bigr) \sim
+  \Dir\bigl(\alpha^{k1}_{ab},\dots,\alpha^{kK}_{ab}\bigr),
+  \qquad
+  \alpha^{k\ell}_{ab} = \alpha\, q^{\ell}_{b} + (\text{optional external terms}),
+\end{equation}
+where $q^{\ell}_{b}$ is the population share of stratum $\ell$ at age $b$ and
+$\alpha>0$ is a precision: larger $\alpha$ pulls the fractions towards the
+population shares. Recall that the Dirichlet density is
+$\propto \prod_{\ell} \eta_\ell^{\alpha_\ell - 1}$ on the simplex.
+
+\subsection{Imposing reciprocity}
+
+At a pair $a>b$ the fractions at both cells are functions of $X$:
+$\eta^{k\ell}_{ab} = X_{k\ell}/r_k$ and
+$\eta^{k\ell}_{ba} = X_{\ell k}/c_k$. Multiplying the Dirichlet densities of
+both cells and keeping only the tables in $\T(\bm r,\bm c)$ gives (the $r_k$
+and $c_k$ are constants)
+\begin{equation}
+  \label{eq:prior}
+  p(X) \;\propto\; \prod_{k,\ell}
+  X_{k\ell}^{\,\beta_{k\ell} - 1},
+  \qquad
+  \beta_{k\ell} = \alpha^{k\ell}_{ab} + \alpha^{\ell k}_{ba} - 1,
+  \qquad X \in \T(\bm r,\bm c).
+\end{equation}
+Each entry $X_{k\ell}$ appears in two places, $\eta^{k\ell}_{ab}$ and
+$\eta^{\ell k}_{ba}$, so its exponent collects one term from each. For a
+diagonal cell the same argument gives
+$p(X) \propto \prod_{k} X_{kk}^{\alpha^{kk}_{aa}-1}
+\prod_{k<\ell} X_{k\ell}^{\alpha^{k\ell}_{aa}+\alpha^{\ell k}_{aa}-2}$
+on symmetric tables.
+
+\begin{remark}[This is not a truncated Dirichlet]
+A \emph{truncated} Dirichlet restricts the Dirichlet to a region of positive
+volume (for example a box of bounds). Here we instead \emph{condition} on the
+equality constraints (C3), a set of lower dimension. The resulting fractions
+are in general neither Dirichlet nor truncated Dirichlet. Conditioning on a
+set of probability zero depends on the coordinates used (the
+Borel--Kolmogorov paradox; \citealp{kolmogorov1933grundbegriffe}); we use the
+table entries, which are linear in the fractions, and the next proposition
+shows this choice is natural.
+\end{remark}
+
+\begin{proposition}[A Gamma construction]
+\label{prop:gamma}
+Let $Y_{k\ell} \sim \Gam(\beta_{k\ell}, 1)$ be independent, with all
+$\beta_{k\ell} > 0$. The conditional distribution of the table $Y$ given its
+row sums $\bm r$ and column sums $\bm c$ has density \eqref{eq:prior}.
+\end{proposition}
+\begin{proof}
+The joint density of $Y$ is
+$\prod_{k\ell} y_{k\ell}^{\beta_{k\ell}-1} e^{-y_{k\ell}}/\Gamma(\beta_{k\ell})$.
+On $\T(\bm r,\bm c)$ the sum $\sum_{k\ell} y_{k\ell} = N$ is fixed, so
+$e^{-\sum y_{k\ell}}$ is a constant and only
+$\prod y_{k\ell}^{\beta_{k\ell}-1}$ remains.
+\end{proof}
+
+This mirrors the familiar fact that a Dirichlet vector is a vector of
+independent Gammas divided by their sum, i.e.\ conditioned on its total
+\citep{ng2011dirichlet}; here we condition on all row \emph{and} column sums.
+It is also the continuous analogue of the classical result that independent
+Poisson counts conditioned on the margins of a table follow a (multivariate)
+hypergeometric distribution, the setting of \citet{diaconis1998algebraic}.
+
+\subsection{When is the prior proper?}
+
+Near a face of $\T$ where $X_{k\ell} \to 0$, the density behaves like
+$X_{k\ell}^{\beta_{k\ell}-1}$, which is integrable only if
+$\beta_{k\ell} > 0$. With no external terms this reads
+\begin{equation}
+  \label{eq:proper}
+  \beta_{k\ell} = \alpha\,\bigl(q^{\ell}_{b} + q^{k}_{a}\bigr) - 1 > 0
+  \quad\Longleftrightarrow\quad
+  \alpha > \frac{1}{q^{\ell}_{b} + q^{k}_{a}} .
+\end{equation}
+With two strata of roughly equal size the shares are near $1/2$, so we need
+$\alpha$ somewhat above $1$; this is why the default is $\alpha = 2$.
+The code checks \eqref{eq:proper} and raises an error that reports the
+smallest admissible $\alpha$. (For $K=2$ one checks directly from
+Example~\ref{ex:k2} that the condition is also necessary.)
+
+%==============================================================================
+\section{Sampling: Gibbs moves along margin-preserving directions}
+\label{sec:gibbs}
+%==============================================================================
+
+We cannot draw from \eqref{eq:prior} directly: its normalising constant has
+no closed form. We therefore use MCMC: build a Markov chain on $\T$ whose
+long-run distribution is \eqref{eq:prior} \citep{robert2004monte}.
+
+\subsection{Moves that keep the margins}
+
+Write $E_{k\ell}$ for the table with a $1$ in position $(k,\ell)$ and zeros
+elsewhere. For rows $k \ne k'$ and columns $\ell \ne \ell'$ define the
+\emph{swap direction}
+\begin{equation}
+  M = E_{k\ell} + E_{k'\ell'} - E_{k\ell'} - E_{k'\ell}
+  \qquad
+  \begin{pmatrix} +1 & -1 \\ -1 & +1 \end{pmatrix}
+  \text{ on rows } k,k' \text{ and columns } \ell,\ell'.
+\end{equation}
+Every row and column of $M$ sums to zero, so $X + dM$ has the same margins as
+$X$ for every number $d$. These $2\times2$ moves are the classical tool for
+exploring tables with fixed margins
+\citep{diaconis1995rectangular,diaconis1998algebraic}. For symmetric
+(diagonal) tables we use $M = E_{k\ell} + E_{\ell k} - E_{kk} - E_{\ell\ell}$,
+which keeps both symmetry and the row sums.
+
+Non-negativity limits how far we can move: $X + dM \in \T$ exactly when
+\begin{equation}
+  d \in [d_-, d_+], \qquad
+  d_- = -\min(X_{k\ell},\, X_{k'\ell'}), \qquad
+  d_+ = \min(X_{k\ell'},\, X_{k'\ell}).
+\end{equation}
+
+\subsection{The one-dimensional target}
+
+Along the move, the density \eqref{eq:prior} becomes a function of $d$ only:
+\begin{equation}
+  \label{eq:onedim}
+  g(d) \;\propto\;
+  (X_{k\ell} + d)^{\beta_{k\ell}-1}\,
+  (X_{k'\ell'} + d)^{\beta_{k'\ell'}-1}\,
+  (X_{k\ell'} - d)^{\beta_{k\ell'}-1}\,
+  (X_{k'\ell} - d)^{\beta_{k'\ell}-1},
+  \qquad d \in [d_-, d_+].
+\end{equation}
+Drawing $d$ from $g$ and setting $X \leftarrow X + dM$ is a \emph{Gibbs
+update along a direction} \citep{gelfand1990sampling}, closely related to
+the hit-and-run sampler of \citet{smith1984efficient}. Each such update
+leaves \eqref{eq:prior} invariant, and so does any fixed sequence of them
+\citep[Section~2.4]{tierney1994markov}. One \emph{sweep} applies every swap
+direction once; the swap directions span every direction in which a table in
+$\T$ can move, so repeated sweeps can explore all of $\T$.
+
+For $K=2$ there is exactly one direction, and $d$ is simply the change in
+$x = X_{12}$ of Example~\ref{ex:k2}.
+
+%==============================================================================
+\section{The slice sampler}
+\label{sec:slice}
+%==============================================================================
+
+\subsection{Why not sample $g$ directly?}
+
+$g$ is a product of up to four powers of linear functions. It is not a
+standard distribution, and neither its cumulative distribution function nor
+its inverse has a closed form, so we cannot use the inverse-CDF method.
+Common alternatives have drawbacks here:
+\begin{itemize}
+  \item \textbf{Random-walk Metropolis} needs a step size, and the right size
+        varies enormously across the thousands of age pairs and posterior
+        draws we update at once.
+  \item \textbf{Rejection sampling} needs an envelope function that lies above
+        $g$. When an exponent $\beta-1$ is between $-1$ and $0$, $g$ is
+        infinite at an end of the interval (though still integrable), which
+        makes envelopes awkward.
+\end{itemize}
+The slice sampler of \citet{neal2003slice} avoids both problems: it has no
+step size to tune, copes with infinite spikes at the ends, needs $g$ only up
+to a constant, and leaves $g$ exactly invariant.
+
+\subsection{The idea}
+
+Sampling from a density is the same as picking a point uniformly from the
+region under its graph, $\{(d,u): 0 < u < g(d)\}$, and keeping the $d$
+coordinate \citep{neal2003slice,damien1999gibbs}. The slice sampler does this
+by alternating two easy steps from the current point $d_0$:
+\begin{enumerate}
+  \item \textbf{Pick a height.} Draw $u \sim \Unif(0, g(d_0))$.
+  \item \textbf{Pick a point on the slice.} Draw the new $d$ uniformly from
+        the \emph{slice} $S = \{d : g(d) > u\}$.
+\end{enumerate}
+Both steps are Gibbs updates for the uniform distribution under the graph,
+so the pair $(d,u)$ keeps that distribution, and $d$ keeps distribution $g$.
+
+For numerical safety we work with logarithms: step 1 is equivalent to
+$y = \log g(d_0) - \varepsilon$ with $\varepsilon \sim \Expo(1)$, and the
+slice is $S = \{d : \log g(d) > y\}$.
+
+\subsection{Finding a point on the slice: shrinkage}
+
+We usually cannot write $S$ down, but we can test whether a given $d$ is in
+it. Neal's \emph{shrinkage} procedure \citep[Section~4.2]{neal2003slice}
+starts from an interval $[L,R]$ that contains the whole slice and repeats:
+\begin{enumerate}
+  \item propose $d^\star \sim \Unif(L,R)$;
+  \item if $d^\star \in S$, accept it and stop;
+  \item otherwise shrink the interval towards the current point: if
+        $d^\star < d_0$ set $L = d^\star$, else set $R = d^\star$.
+\end{enumerate}
+Because the current point $d_0$ is always in $S$ and always stays inside
+$[L,R]$, the loop ends. Neal proves that this procedure leaves the uniform
+distribution on $S$ invariant, even when $S$ is not a single interval
+\citep[Sections~4.2--4.3]{neal2003slice}; this matters here because $g$ can
+be U-shaped, giving a slice made of two pieces.
+
+Our situation is the easiest one Neal describes: $g$ lives on the bounded
+interval $[d_-, d_+]$, so we start with $[L,R] = [d_-, d_+]$, which certainly
+contains $S$. No ``stepping-out'' phase is needed.
+
+\subsection{The full algorithm}
+
+\begin{algorithm}[ht]
+\caption{One slice update of a table $X$ along direction $M$
+(current step $d_0 = 0$)}
+\label{alg:slice}
+\begin{algorithmic}[1]
+\State $d_- \gets -\min(X_{k\ell}, X_{k'\ell'})$,\;
+       $d_+ \gets \min(X_{k\ell'}, X_{k'\ell})$
+\If{$d_- = d_+$} \Return $X$ \Comment{no room to move}
+\EndIf
+\State $y \gets \log g(0) - \varepsilon$, \quad $\varepsilon \sim \Expo(1)$
+\State $L \gets d_-$, \quad $R \gets d_+$
+\Loop
+  \State $d^\star \sim \Unif(L, R)$
+  \If{$\log g(d^\star) > y$}
+    \State \Return $X + d^\star M$
+  \ElsIf{$d^\star < 0$}
+    \State $L \gets d^\star$
+  \Else
+    \State $R \gets d^\star$
+  \EndIf
+\EndLoop
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[ht]
+\caption{\texttt{sample\_eta}: one table per age pair and posterior draw}
+\label{alg:full}
+\begin{algorithmic}[1]
+\For{each posterior draw and each age pair $a \ge b$}
+  \State $\bm r \gets (z^{k}_{ab})_k$,\; $\bm c \gets (z^{\ell}_{ba})_\ell$,\;
+         $N \gets \sum_k r_k$
+  \State $X \gets \bm r \bm c^{\top} / N$
+         \Comment{independence table: strictly inside $\T$}
+\EndFor
+\For{sweep $= 1, \dots, n_{\text{sweeps}}$}
+  \For{each swap direction $M$ (symmetric directions on the diagonal)}
+    \State update every table with Algorithm~\ref{alg:slice}
+  \EndFor
+\EndFor
+\State $\eta^{k\ell}_{ab} \gets X_{k\ell}/r_k$,\;
+       $\eta^{k\ell}_{ba} \gets X_{\ell k}/c_k$
+\end{algorithmic}
+\end{algorithm}
+
+%==============================================================================
+\section{Implementation notes}
+\label{sec:impl}
+%==============================================================================
+
+\begin{itemize}
+  \item \textbf{Starting point.} The independence table $\bm r\bm c^{\top}/N$
+        has the right margins and positive entries whenever the margins are
+        positive, so it is a valid starting point. MCMC draws are only exact
+        in the limit; after a finite number of sweeps they still depend
+        slightly on where the chain started.
+  \item \textbf{Number of sweeps.} The default is
+        $n_{\text{sweeps}} = 10$. In a test cell with an exactly computable
+        mean, $1$--$3$ sweeps were visibly biased towards the starting point,
+        while $5$ or more sweeps matched the exact mean.
+  \item \textbf{Vectorisation.} All tables (every posterior draw and age
+        pair) run as independent chains, updated together with NumPy. Almost
+        every chain accepts its first proposal (on average $1.04$ proposals
+        per update), so after the first proposal the code only keeps working
+        on the few chains that have not yet accepted. This gave a
+        $6\times$ speed-up without changing the algorithm.
+  \item \textbf{Zero margins.} If a source has no contacts at a cell
+        ($r_k = 0$), its row is zero, every move involving it has
+        $d_- = d_+ = 0$, and its fractions are reported as $0$.
+\end{itemize}
+
+%==============================================================================
+\section{Checks}
+\label{sec:checks}
+%==============================================================================
+
+The unit tests in \texttt{cntmosaic/predict/tests/test\_predict.py} check:
+\begin{itemize}
+  \item sum-to-one (C2) and reciprocity (C3) hold to machine precision
+        (around $10^{-16}$), for $K=2$ and $K=3$;
+  \item every fraction lies within its Fr\'echet--Hoeffding bounds;
+  \item for $K=2$, the sampled mean of $x$ in Example~\ref{ex:k2} agrees,
+        within four standard errors, with the exact mean of \eqref{eq:onedim}
+        computed by numerical integration;
+  \item an improper prior (condition \eqref{eq:proper} violated) raises an
+        error, and non-reciprocal input totals trigger a warning.
+\end{itemize}
+
+%==============================================================================
+\section{Summary and limitations}
+\label{sec:summary}
+%==============================================================================
+
+\begin{itemize}
+  \item Reciprocity and sum-to-one turn each age pair into a table with known
+        row and column totals (Proposition~\ref{prop:equiv}); any such table is
+        a valid answer.
+  \item The prior is the Dirichlet prior of each cell, conditioned on
+        reciprocity; equivalently, independent Gamma entries conditioned on
+        the margins (Proposition~\ref{prop:gamma}). It is proper when
+        condition \eqref{eq:proper} holds.
+  \item We sample it with Gibbs updates along margin-preserving swap
+        directions \citep{diaconis1998algebraic}, each drawn exactly with a
+        shrinkage slice sampler \citep{neal2003slice}.
+\end{itemize}
+
+\noindent
+\textbf{Limitations.}
+(i) The draws are approximate for a finite number of sweeps.
+(ii) The conditioned prior depends on the choice of coordinates (see the
+Remark in Section~\ref{sec:prior}); we use the table entries.
+(iii) We are not aware of a published source that uses exactly this
+construction for contact matrices; the components above are standard, and
+the closest analogue is the Diaconis--Sturmfels approach for discrete tables.
+
+%==============================================================================
+\begin{thebibliography}{99}
+%==============================================================================
+
+\bibitem[Arregui et al.(2018)]{arregui2018projecting}
+Arregui, S., Aleta, A., Sanz, J. and Moreno, Y. (2018).
+Projecting social contact matrices to different demographic structures.
+\emph{PLoS Computational Biology}, 14(12), e1006638.
+
+\bibitem[Damien et al.(1999)]{damien1999gibbs}
+Damien, P., Wakefield, J. and Walker, S. (1999).
+Gibbs sampling for Bayesian non-conjugate and hierarchical models by using
+auxiliary variables.
+\emph{Journal of the Royal Statistical Society: Series B}, 61(2), 331--344.
+
+\bibitem[Diaconis and Gangolli(1995)]{diaconis1995rectangular}
+Diaconis, P. and Gangolli, A. (1995).
+Rectangular arrays with fixed margins.
+In \emph{Discrete Probability and Algorithms}, IMA Volumes in Mathematics and
+its Applications, vol.~72, 15--41. Springer.
+
+\bibitem[Diaconis and Sturmfels(1998)]{diaconis1998algebraic}
+Diaconis, P. and Sturmfels, B. (1998).
+Algebraic algorithms for sampling from conditional distributions.
+\emph{The Annals of Statistics}, 26(1), 363--397.
+
+\bibitem[Fr\'echet(1951)]{frechet1951tableaux}
+Fr\'echet, M. (1951).
+Sur les tableaux de corr\'elation dont les marges sont donn\'ees.
+\emph{Annales de l'Universit\'e de Lyon, Section A}, 14, 53--77.
+
+\bibitem[Gelfand and Smith(1990)]{gelfand1990sampling}
+Gelfand, A. E. and Smith, A. F. M. (1990).
+Sampling-based approaches to calculating marginal densities.
+\emph{Journal of the American Statistical Association}, 85(410), 398--409.
+
+\bibitem[Hoeffding(1940)]{hoeffding1940masstabinvariante}
+Hoeffding, W. (1940).
+Masstabinvariante Korrelationstheorie.
+\emph{Schriften des Mathematischen Instituts und des Instituts f\"ur
+Angewandte Mathematik der Universit\"at Berlin}, 5, 181--233.
+
+\bibitem[Kolmogorov(1933)]{kolmogorov1933grundbegriffe}
+Kolmogorov, A. N. (1933).
+\emph{Grundbegriffe der Wahrscheinlichkeitsrechnung}. Springer, Berlin.
+
+\bibitem[Neal(2003)]{neal2003slice}
+Neal, R. M. (2003).
+Slice sampling.
+\emph{The Annals of Statistics}, 31(3), 705--767.
+
+\bibitem[Ng et al.(2011)]{ng2011dirichlet}
+Ng, K. W., Tian, G.-L. and Tang, M.-L. (2011).
+\emph{Dirichlet and Related Distributions: Theory, Methods and
+Applications}. Wiley.
+
+\bibitem[Robert and Casella(2004)]{robert2004monte}
+Robert, C. P. and Casella, G. (2004).
+\emph{Monte Carlo Statistical Methods}, 2nd edition. Springer.
+
+\bibitem[Smith(1984)]{smith1984efficient}
+Smith, R. L. (1984).
+Efficient Monte Carlo procedures for generating points uniformly distributed
+over bounded regions.
+\emph{Operations Research}, 32(6), 1296--1308.
+
+\bibitem[Tierney(1994)]{tierney1994markov}
+Tierney, L. (1994).
+Markov chains for exploring posterior distributions.
+\emph{The Annals of Statistics}, 22(4), 1701--1762.
+
+\bibitem[Wallinga et al.(2006)]{wallinga2006using}
+Wallinga, J., Teunis, P. and Kretzschmar, M. (2006).
+Using data on social contacts to estimate age-specific transmission
+parameters for respiratory-spread infectious agents.
+\emph{American Journal of Epidemiology}, 164(10), 936--944.
+
+\end{thebibliography}
+
+\end{document}
