@@ -22,6 +22,9 @@ from ._socialmix_helpers import (
     create_stratum_labels,
     infer_strat_mode,
     participant_labels,
+    population_by_contact_stratum,
+    stratum_codes,
+    stratum_dims,
 )
 
 
@@ -349,22 +352,22 @@ class SocialMixBootstrap:
         self.C = len(self.part_data.data["part_age_grp"].cat.categories)
         self.D = len(self.cnt_data.data["cnt_age_grp"].cat.categories)
 
-        # Calculate K_part and K_cnt
-        if self.strat_vars_part:
-            self.K_part = 1
-            for var in self.strat_vars_part:
-                col_name = f"part_{var}"
-                self.K_part *= self.part_data.data[col_name].nunique()
-        else:
-            self.K_part = 1
-
-        if self.strat_vars_cnt:
-            self.K_cnt = 1
-            for var in self.strat_vars_cnt:
-                col_name = f"cnt_{var}"
-                self.K_cnt *= self.cnt_data.data[col_name].nunique()
-        else:
-            self.K_cnt = 1
+        # K_part and K_cnt = product of the number of categories (not nunique),
+        # matching the stratum labels and the point estimate.
+        self.K_part = int(
+            np.prod(
+                stratum_dims(
+                    self.part_data.data, [f"part_{v}" for v in self.strat_vars_part]
+                )
+            )
+        )
+        self.K_cnt = int(
+            np.prod(
+                stratum_dims(
+                    self.cnt_data.data, [f"cnt_{v}" for v in self.strat_vars_cnt]
+                )
+            )
+        )
 
         # Build contact count tensor
         Y_raw = self._build_contact_tensor()  # (N, K_cnt, D)
@@ -454,18 +457,9 @@ class SocialMixBootstrap:
         ``itertools.product(*category_lists)`` — i.e. row-major over the
         cartesian product of per-variable categories.
         """
-        if not self.strat_vars_part:
-            return np.zeros(len(self.part_data.data), dtype=np.int32)
-
-        code_arrays = [
-            self.part_data.data[f"part_{v}"].cat.codes.values
-            for v in self.strat_vars_part
-        ]
-        dims = tuple(
-            len(self.part_data.data[f"part_{v}"].cat.categories)
-            for v in self.strat_vars_part
-        )
-        return np.ravel_multi_index(code_arrays, dims=dims).astype(np.int32)
+        return stratum_codes(
+            self.part_data.data, [f"part_{v}" for v in self.strat_vars_part]
+        ).astype(np.int32)
 
     def _get_participant_stratum_mapping(self) -> Dict:
         """Create mapping from participant stratum tuple to integer code."""
@@ -522,29 +516,19 @@ class SocialMixBootstrap:
             )
             self.P = pop_sizes.values.astype(np.float64)
         else:
-            # With stratification
-            strat_vars_pop = self.pop_data.get_strat_vars(prefix=False)
-            group_cols = strat_vars_pop + ["age_grp"]
-            pop_sizes = self.pop_data.data.groupby(group_cols, observed=False)[
-                "P"
-            ].sum()
-
-            # Reshape to (K_cnt, D)
-            self.P = np.zeros((self.K_cnt, self.D), dtype=np.float64)
-            cnt_strat_mapping = self._get_contact_stratum_mapping()
-
-            for idx, value in pop_sizes.items():
-                if self.strat_mode == "single":
-                    age_grp = idx
-                    d_code = intervals.index(age_grp)
-                    self.P[d_code] = value
-                else:
-                    # idx is a tuple: (*strat_values, age_grp)
-                    strat_tuple = idx[:-1]
-                    age_grp = idx[-1]
-                    k = cnt_strat_mapping[strat_tuple]
-                    d_code = intervals.index(age_grp)
-                    self.P[k, d_code] = value
+            # With stratification: match population rows to contact strata by
+            # category value, in contact-stratum label order (same helper as the
+            # point estimate).
+            P = population_by_contact_stratum(
+                self.pop_data.data, self.strat_vars_cnt, self.cnt_data.data, n_age=self.D
+            )
+            if P is None:
+                raise ValueError(
+                    "Population data must contain every contact stratification "
+                    f"variable {self.strat_vars_cnt} to compute stratified rates; "
+                    f"got {self.pop_data.get_strat_vars(prefix=False)}."
+                )
+            self.P = P
 
     def _bootstrap_iteration(
         self,

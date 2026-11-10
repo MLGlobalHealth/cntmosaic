@@ -13,6 +13,11 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from ...utils import AgeGroupSpecs
+from ...utils._strata import (  # noqa: F401  (re-exported)
+    ravel_stratum_codes,
+    stratum_codes,
+    stratum_dims,
+)
 
 
 def infer_strat_mode(strat_vars_part: List[str], strat_vars_cnt: List[str]) -> str:
@@ -92,6 +97,71 @@ def _side_labels(strat_vars: List[str], data, prefix: str) -> List[str]:
         "_".join(str(x) for x in combo)
         for combo in itertools.product(*category_lists)
     ]
+
+
+def population_by_contact_stratum(
+    df_pop: pd.DataFrame,
+    strat_vars_cnt: List[str],
+    cnt_df: pd.DataFrame,
+    n_age: int,
+    age_col: str = "age_grp",
+    size_col: str = "P",
+) -> Optional[NDArray]:
+    """Population sizes arranged as ``(K_cnt, D)`` in contact-stratum label order.
+
+    Each population row is matched to a contact stratum **by category value**,
+    so the result is correct whatever the order of the stratification variables
+    in the population data and whatever the order of their categories.
+    Population variables that are not contact stratification variables are
+    summed over.
+
+    Parameters
+    ----------
+    df_pop : pd.DataFrame
+        Population data with a categorical *age_col* and a *size_col*.
+    strat_vars_cnt : list of str
+        Contact stratification variables (without prefix), in label order.
+    cnt_df : pd.DataFrame
+        Contact data with columns ``"cnt_{var}"``; its categories define the
+        contact strata.
+    n_age : int
+        Number of age groups ``D``.
+
+    Returns
+    -------
+    np.ndarray or None
+        Array of shape ``(K_cnt, D)``, or ``None`` if the population data does
+        not contain every contact stratification variable (the caller then
+        decides how to proceed).
+    """
+    if any(v not in df_pop.columns for v in strat_vars_cnt):
+        return None
+
+    cnt_cols = [f"cnt_{v}" for v in strat_vars_cnt]
+    dims = stratum_dims(cnt_df, cnt_cols)
+    grouped = (
+        df_pop.groupby(strat_vars_cnt + [age_col], observed=False)[size_col]
+        .sum()
+        .reset_index()
+    )
+
+    # Re-encode each population variable with the contact categories.
+    code_arrays = [
+        pd.Categorical(
+            grouped[v].astype(object), categories=cnt_df[c].cat.categories
+        ).codes
+        for v, c in zip(strat_vars_cnt, cnt_cols)
+    ]
+    # Population categories that are not contact categories have no stratum.
+    keep = np.all([codes >= 0 for codes in code_arrays], axis=0)
+
+    k = ravel_stratum_codes([codes[keep] for codes in code_arrays], dims)
+    d = grouped[age_col].cat.codes.to_numpy()[keep]
+    values = grouped[size_col].to_numpy(dtype=np.float64)[keep]
+
+    P = np.zeros((int(np.prod(dims)), n_age), dtype=np.float64)
+    P[k, d] = values
+    return P
 
 
 def participant_labels(strat_vars_part: List[str], part_data) -> List[str]:

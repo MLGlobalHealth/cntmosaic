@@ -7,6 +7,7 @@ Handles validation logic for SocialMix preprocessing, including:
 - Bootstrap requirement validation and adaptive age group merging
 """
 
+import dataclasses
 import warnings
 from typing import Dict, List, Optional
 
@@ -18,6 +19,7 @@ from ...dataloader import ContactData, ParticipantData, PopulationData
 from ...utils import AgeGroupSpecs
 from ._socialmix_age_processing import AgeBinProcessor
 from ._socialmix_helpers import infer_strat_mode
+from ...utils._participant_cells import build_participant_cells, copy_container
 
 
 class SocialMixValidator:
@@ -74,6 +76,9 @@ class SocialMixValidator:
         # Initialize age processor
         self.age_processor = AgeBinProcessor(age_group_specs)
 
+        # Participants dropped because their age is outside the age groups
+        self.n_dropped: int = 0
+
         # Stratification variables
         self.strat_vars_part: List[str] = []
         self.strat_vars_cnt: List[str] = []
@@ -121,11 +126,25 @@ class SocialMixValidator:
         if self.validate_for_bootstrap:
             self._validate_bootstrap_requirements()
 
+        # Final participant cells, after any merging. Nothing is dropped or
+        # merged here any more, so this emits no warnings.
+        cells = dataclasses.replace(
+            build_participant_cells(
+                self.part_data.data,
+                [f"part_{var}" for var in self.strat_vars_part],
+                self.age_group_specs,
+                adaptive_merge=False,
+                strict=True,
+            ),
+            n_dropped=self.n_dropped,
+        )
+
         return {
             "part_data": self.part_data,
             "cnt_data": self.cnt_data,
             "age_group_specs": self.age_group_specs,
             "apply_reciprocity": self.apply_reciprocity,
+            "cells": cells,
         }
 
     def _extract_strat_vars(self) -> None:
@@ -355,168 +374,31 @@ class SocialMixValidator:
                 f"{self.age_group_specs.max - 1}."
             )
 
-        # Determine grouping columns based on stratification
-        group_cols = [f"part_{var}" for var in self.strat_vars_part] + ["part_age_grp"]
-
-        # Compute counts for all (stratum, age_group) combinations
-        if self.strat_vars_part:
-            # Stratified case: group by strat vars + age
-            strata_age_counts = self.part_data.data.groupby(
-                group_cols, observed=False
-            ).size()
-
-            # For each age group, find minimum count across all strata
-            age_min_counts = strata_age_counts.groupby(
-                "part_age_grp", observed=False
-            ).min()
-
-            # Reindex to ensure all age groups present
-            age_min_counts = age_min_counts.reindex(
-                pd.Index(self.part_data.data["part_age_grp"].cat.categories),
-                fill_value=0,
+        # Bin, drop participants outside the age groups (D23) and merge empty
+        # age groups, through the shared helper that previews also use.
+        cells = build_participant_cells(
+            self.part_data.data,
+            [f"part_{var}" for var in self.strat_vars_part],
+            self.age_group_specs,
+            adaptive_merge=self.adaptive_merge,
+            strict=True,
+        )
+        self.n_dropped = cells.n_dropped
+        # Replace the data instead of rebuilding the container, so that every
+        # column survives (D24).
+        self.part_data = copy_container(self.part_data, cells.part)
+        if cells.merged:
+            self.cnt_data = copy_container(
+                self.cnt_data,
+                self.age_processor.reassign_age_groups(
+                    self.cnt_data.data,
+                    age_grp_col="cnt_age_grp",
+                    merged_intervals=cells.age_groups,
+                    new_group_col="cnt_age_grp",
+                ),
             )
-
-            empty_groups = age_min_counts[age_min_counts == 0].index.tolist()
-        else:
-            # No stratification: simple age group counts
-            age_grp_counts = (
-                self.part_data.data.groupby("part_age_grp", observed=False)
-                .size()
-                .reindex(
-                    pd.Index(self.part_data.data["part_age_grp"].cat.categories),
-                    fill_value=0,
-                )
-            )
-
-            empty_groups = age_grp_counts[age_grp_counts == 0].index.tolist()
-
-        # Handle empty age groups
-        if empty_groups:
-            if self.adaptive_merge:
-                # Merge empty age groups until none remain
-                warnings.warn(
-                    f"Found empty participant age group(s): {empty_groups}. "
-                    f"Merging age groups to enable contact intensity estimation.",
-                    UserWarning,
-                )
-
-                # Keep merging until no empty groups remain
-                while empty_groups:
-                    # Get current counts
-                    if self.strat_vars_part:
-                        strata_age_counts = self.part_data.data.groupby(
-                            group_cols, observed=False
-                        ).size()
-                        age_min_counts = strata_age_counts.groupby(
-                            "part_age_grp", observed=False
-                        ).min()
-                        age_min_counts = age_min_counts.reindex(
-                            pd.Index(
-                                self.part_data.data["part_age_grp"].cat.categories
-                            ),
-                            fill_value=0,
-                        )
-                    else:
-                        age_min_counts = (
-                            self.part_data.data.groupby("part_age_grp", observed=False)
-                            .size()
-                            .reindex(
-                                pd.Index(
-                                    self.part_data.data["part_age_grp"].cat.categories
-                                ),
-                                fill_value=0,
-                            )
-                        )
-
-                    # Merge age groups with zero counts
-                    merged_intervals = self.age_processor.merge_zero_groups(
-                        list(age_min_counts.index), age_min_counts.values
-                    )
-
-                    # Reassign age groups
-                    df_part_updated = self.age_processor.reassign_age_groups(
-                        self.part_data.data,
-                        age_grp_col="part_age_grp",
-                        merged_intervals=merged_intervals,
-                        new_group_col="part_age_grp",
-                    )
-
-                    df_cnt_updated = self.age_processor.reassign_age_groups(
-                        self.cnt_data.data,
-                        age_grp_col="cnt_age_grp",
-                        merged_intervals=merged_intervals,
-                        new_group_col="cnt_age_grp",
-                    )
-
-                    # Update data containers
-                    # Use standardized 'id' column name — containers rename id_col to 'id' on init
-                    self.part_data = ParticipantData(
-                        df_part_updated,
-                        id_col="id",
-                        age_grp_col="part_age_grp",
-                        strat_var_cols=self.part_data.get_strat_vars(prefix=True),
-                    )
-
-                    self.cnt_data = ContactData(
-                        df_cnt_updated,
-                        id_col="id",
-                        age_grp_col="cnt_age_grp",
-                        cnt_col=self.cnt_data.cnt_col,
-                        strat_var_cols=self.cnt_data.get_strat_vars(prefix=True),
-                    )
-
-                    # Update age bins
-                    new_left = [interval.left for interval in merged_intervals]
-                    new_right = [interval.right - 1 for interval in merged_intervals]
-                    self.age_group_specs = self.age_group_specs.replace(
-                        age_min=new_left, age_max=new_right
-                    )
-
-                    # Check for remaining empty groups
-                    if self.strat_vars_part:
-                        strata_age_counts = self.part_data.data.groupby(
-                            group_cols, observed=False
-                        ).size()
-                        age_min_counts = strata_age_counts.groupby(
-                            "part_age_grp", observed=False
-                        ).min()
-                        age_min_counts = age_min_counts.reindex(
-                            pd.Index(
-                                self.part_data.data["part_age_grp"].cat.categories
-                            ),
-                            fill_value=0,
-                        )
-                        empty_groups = age_min_counts[
-                            age_min_counts == 0
-                        ].index.tolist()
-                    else:
-                        age_grp_counts = (
-                            self.part_data.data.groupby("part_age_grp", observed=False)
-                            .size()
-                            .reindex(
-                                pd.Index(
-                                    self.part_data.data["part_age_grp"].cat.categories
-                                ),
-                                fill_value=0,
-                            )
-                        )
-                        empty_groups = age_grp_counts[
-                            age_grp_counts == 0
-                        ].index.tolist()
-            else:
-                # Cannot proceed without merging
-                strata_info = ""
-                if self.strat_vars_part:
-                    strata_info = f" across {len(self.strat_vars_part)} stratification variable(s)"
-
-                raise ValueError(
-                    f"\nCannot estimate contact intensity matrix: found empty participant age group(s){strata_info}: {empty_groups}. "
-                    f"\nEmpty age groups cause division by zero when computing contact intensities. "
-                    f"\nPlease either:\n"
-                    f"  1. Set adaptive_merge=True to automatically merge empty age groups, or\n"
-                    f"  2. Use coarser age bins that avoid empty groups, or\n"
-                    f"  3. Collect more participant data to fill all age groups."
-                )
+            self.age_group_specs = cells.age_group_specs
+            self.age_processor = AgeBinProcessor(self.age_group_specs)
 
     def _validate_bootstrap_requirements(self) -> None:
         """
@@ -669,23 +551,10 @@ class SocialMixValidator:
             new_group_col="cnt_age_grp",
         )
 
-        # Create new data containers with updated dataframes
-        self.part_data = ParticipantData(
-            df_part_updated,
-            id_col=self.part_data.id_col,
-            age_col=None,
-            age_grp_col="part_age_grp",
-            strat_var_cols=self.part_data.strat_var_cols,
-        )
-
-        self.cnt_data = ContactData(
-            df_cnt_updated,
-            id_col=self.cnt_data.id_col,
-            age_col=None,
-            age_grp_col="cnt_age_grp",
-            cnt_col=self.cnt_data.cnt_col,
-            strat_var_cols=self.cnt_data.strat_var_cols,
-        )
+        # Replace the data instead of rebuilding the containers, so that every
+        # column survives (D24).
+        self.part_data = copy_container(self.part_data, df_part_updated)
+        self.cnt_data = copy_container(self.cnt_data, df_cnt_updated)
 
         # Replace age bins with a new AgeGroupSpecs built from merged bounds
         new_left = [interval.left for interval in merged_intervals]
@@ -752,24 +621,10 @@ class SocialMixValidator:
                 new_group_col="cnt_age_grp",
             )
 
-            # Create new data containers with updated dataframes.
-            # The updated DataFrames are derived from already-preprocessed .data,
-            # so the ID column is the standardized "id" name, not the original
-            # user-supplied id_col (which may have been renamed during preprocessing).
-            self.part_data = ParticipantData(
-                df_part_updated,
-                id_col="id",
-                age_grp_col="part_age_grp",
-                strat_var_cols=[f"part_{var}" for var in self.strat_vars_part],
-            )
-
-            self.cnt_data = ContactData(
-                df_cnt_updated,
-                id_col="id",
-                age_grp_col="cnt_age_grp",
-                cnt_col=self.cnt_data.cnt_col,
-                strat_var_cols=[f"cnt_{var}" for var in self.strat_vars_cnt],
-            )
+            # Replace the data instead of rebuilding the containers, so that
+            # every column survives (D24).
+            self.part_data = copy_container(self.part_data, df_part_updated)
+            self.cnt_data = copy_container(self.cnt_data, df_cnt_updated)
 
             # Update validator's stratification tracking to match new containers
             self.strat_vars_part = self.part_data.get_strat_vars(prefix=False)

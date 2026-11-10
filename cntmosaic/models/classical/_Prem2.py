@@ -272,19 +272,16 @@ class Prem2(Prem2NumPyroMixin, ContactModel):
             list(set(self.strat_vars_cnt) - set(self.strat_vars_part))
         )
 
-        # Calculate stratification dimensions for participant variables
-        self.strat_dims_part = {}
-        if self.strat_vars_part:
-            for var in self.strat_vars_part:
-                col_name = f"part_{var}"
-                self.strat_dims_part[var] = self.part_data.data[col_name].nunique()
-
-        # Calculate stratification dimensions for contact variables
-        self.strat_dims_cnt = {}
-        if self.strat_vars_cnt:
-            for var in self.strat_vars_cnt:
-                col_name = f"cnt_{var}"
-                self.strat_dims_cnt[var] = self.cnt_data.data[col_name].nunique()
+        # Stratification dimensions = number of categories (not nunique), so
+        # they agree with the stratum labels used by the shared SocialMix loader.
+        self.strat_dims_part = {
+            var: len(self.part_data.data[f"part_{var}"].cat.categories)
+            for var in self.strat_vars_part
+        }
+        self.strat_dims_cnt = {
+            var: len(self.cnt_data.data[f"cnt_{var}"].cat.categories)
+            for var in self.strat_vars_cnt
+        }
 
         # Calculate expected number of strata
         self.K = self._calculate_K()

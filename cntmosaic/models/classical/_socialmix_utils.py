@@ -13,6 +13,7 @@ from numpy.typing import NDArray
 from ...dataloader import ContactData, ParticipantData, PopulationData
 from ...utils import AgeGroupSpecs
 from ._socialmix_age_processing import AgeBinProcessor
+from ._socialmix_helpers import population_by_contact_stratum, ravel_stratum_codes
 
 if TYPE_CHECKING:
     from ._SocialMix import SocialMix
@@ -252,17 +253,26 @@ class SocialMixDataLoader:
 
             self.sm.P = pop_sizes.values.astype(np.float64)
         else:
-            # Stratified: group by strat vars + age
-            group_cols = self.sm.strat_vars_pop + ["age_grp"]
-            pop_sizes = df_pop.groupby(group_cols, observed=False)["P"].sum()
-
-            # Reshape to (K_cnt, D) matrix
-            self.sm.P = self._fill_simple_array(
-                pop_sizes,
-                shape=(self.sm.K_cnt, self.sm.D),
-                strat_vars=self.sm.strat_vars_pop,
-                suffix=None,  # Population data has no part_/cnt_ prefix
+            # Stratified: match population rows to contact strata by category
+            # value, in contact-stratum label order.
+            P = population_by_contact_stratum(
+                df_pop,
+                self.sm.strat_vars_cnt,
+                self.sm.cnt_data.data,
+                n_age=self.sm.D,
             )
+            if P is None:
+                # Population lacks some contact stratification variable:
+                # keep the previous behaviour (rows filled by population codes).
+                group_cols = self.sm.strat_vars_pop + ["age_grp"]
+                pop_sizes = df_pop.groupby(group_cols, observed=False)["P"].sum()
+                P = self._fill_simple_array(
+                    pop_sizes,
+                    shape=(self.sm.K_cnt, self.sm.D),
+                    strat_vars=self.sm.strat_vars_pop,
+                    suffix=None,  # Population data has no part_/cnt_ prefix
+                )
+            self.sm.P = P
 
     def _assign_age_groups_to_population(self) -> None:
         """
@@ -492,11 +502,9 @@ class SocialMixDataLoader:
         if not code_cols:
             return pd.Series(0, index=df.index)
 
-        composite = df[code_cols[0]].astype(int)
-        multiplier = 1
-
-        for i in range(1, len(code_cols)):
-            multiplier *= dims[i - 1]
-            composite = composite + multiplier * df[code_cols[i]].astype(int)
-
-        return composite
+        # First variable most significant: the order of the stratum labels
+        # (itertools.product) and of the bootstrap.
+        return pd.Series(
+            ravel_stratum_codes([df[c].to_numpy() for c in code_cols], dims),
+            index=df.index,
+        )

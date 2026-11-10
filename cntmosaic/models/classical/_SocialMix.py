@@ -12,6 +12,7 @@ Key Features:
 - Comprehensive input validation
 """
 
+import dataclasses
 import warnings
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
@@ -23,7 +24,8 @@ from ...analysis.summariser._summary import ContactSummary
 from ...dataloader import ContactData, ParticipantData, PopulationData
 from ...utils import AgeGroupSpecs
 from ._base import DeterministicContactModel
-from ._socialmix_age_processing import AgeBinProcessor
+from ...utils._age_bin_processor import AgeBinProcessor
+from ...utils._participant_cells import bin_ages, copy_container
 from ._socialmix_bootstrap import BootstrapResults, SocialMixBootstrap
 from ._socialmix_helpers import apply_reciprocity, create_stratum_labels, infer_strat_mode
 from ._socialmix_utils import SocialMixDataLoader
@@ -192,6 +194,7 @@ class SocialMix(DeterministicContactModel):
         self._cint: Optional[NDArray] = None
         self._rate: Optional[NDArray] = None
         self._boot: Optional[BootstrapResults] = None
+        self._cells = None  # ParticipantCells, set in _preprocess
 
         # Data arrays (initialized in _load)
         self.Y: Optional[NDArray] = None  # Contact counts
@@ -364,6 +367,13 @@ class SocialMix(DeterministicContactModel):
         - Full: Same vars on both sides → K=product of squares
         - Mixed: Some overlap → K=complex product
         """
+        # Work on copies so that the user's containers are never modified
+        # (dev plan Problem 11). Copies keep every column (no re-preprocessing).
+        self.part_data = copy_container(self.part_data)
+        self.cnt_data = copy_container(self.cnt_data)
+        if self.pop_data is not None:
+            self.pop_data = copy_container(self.pop_data)
+
         # Assign age groups first (needed for validation)
         self._assign_age_groups()
 
@@ -389,6 +399,9 @@ class SocialMix(DeterministicContactModel):
         self.age_group_specs = validated["age_group_specs"]
         self.age_processor = AgeBinProcessor(self.age_group_specs)
         self.apply_reciprocity = validated["apply_reciprocity"]
+        # Participant cells (age group x participant strata), shared with
+        # WeightSpecs.preview() via build_participant_cells.
+        self._cells = validated["cells"]
 
         # Extract stratification variables from validated data
         self.strat_vars_part = self.part_data.get_strat_vars(prefix=False)
@@ -410,19 +423,16 @@ class SocialMix(DeterministicContactModel):
             list(set(self.strat_vars_cnt) - set(self.strat_vars_part))
         )
 
-        # Calculate stratification dimensions for participant variables
-        self.strat_dims_part = {}
-        if self.strat_vars_part:
-            for var in self.strat_vars_part:
-                col_name = f"part_{var}"
-                self.strat_dims_part[var] = self.part_data.data[col_name].nunique()
-
-        # Calculate stratification dimensions for contact variables
-        self.strat_dims_cnt = {}
-        if self.strat_vars_cnt:
-            for var in self.strat_vars_cnt:
-                col_name = f"cnt_{var}"
-                self.strat_dims_cnt[var] = self.cnt_data.data[col_name].nunique()
+        # Stratification dimensions = number of categories (not nunique), so
+        # they agree with the stratum labels, which enumerate every category.
+        self.strat_dims_part = {
+            var: len(self.part_data.data[f"part_{var}"].cat.categories)
+            for var in self.strat_vars_part
+        }
+        self.strat_dims_cnt = {
+            var: len(self.cnt_data.data[f"cnt_{var}"].cat.categories)
+            for var in self.strat_vars_cnt
+        }
 
         # Calculate expected number of strata
         self.K = self._calculate_K()
@@ -471,49 +481,30 @@ class SocialMix(DeterministicContactModel):
         Assign age groups to participants and contacts if not already provided.
 
         Uses the age_bins provided during initialization to categorize
-        raw ages into age groups.
+        raw ages into age groups. Operates on the working copies made in
+        :meth:`_preprocess`. Single-year ages are always re-binned, so a stale
+        age-group column can never be reused (dev plan Problem 11); pre-binned
+        age groups are kept as given.
         """
-        bin_edges = self.age_group_specs.left + [self.age_group_specs.right[-1] + 1]
+        # Participants
+        if "part_age" in self.part_data.data.columns:
+            self.part_data.data["part_age_grp"] = bin_ages(
+                self.part_data.data["part_age"], self.age_group_specs
+            )
+        elif "part_age_grp" not in self.part_data.data.columns:
+            raise ValueError(
+                "ParticipantData must have either 'part_age' or 'part_age_grp' column."
+            )
 
-        # Interval labels: right bound is exclusive (right[i] + 1)
-        intervals = [
-            pd.Interval(left=l, right=r + 1, closed="left")
-            for l, r in zip(self.age_group_specs.left, self.age_group_specs.right)
-        ]
-
-        # Assign age groups to participants if not present
-        if "part_age_grp" not in self.part_data.data.columns:
-            if "part_age" in self.part_data.data.columns:
-                # Create age groups from raw ages
-                ages = self.part_data.data["part_age"]
-                age_grps = pd.cut(
-                    ages,
-                    bins=bin_edges,
-                    right=False,
-                    labels=intervals,
-                )
-                self.part_data.data["part_age_grp"] = age_grps
-            else:
-                raise ValueError(
-                    "ParticipantData must have either 'part_age' or 'part_age_grp' column."
-                )
-
-        # Assign age groups to contacts if not present
-        if "cnt_age_grp" not in self.cnt_data.data.columns:
-            if "cnt_age" in self.cnt_data.data.columns:
-                # Create age groups from raw ages
-                ages = self.cnt_data.data["cnt_age"]
-                age_grps = pd.cut(
-                    ages,
-                    bins=bin_edges,
-                    right=False,
-                    labels=intervals,
-                )
-                self.cnt_data.data["cnt_age_grp"] = age_grps
-            else:
-                raise ValueError(
-                    "ContactData must have either 'cnt_age' or 'cnt_age_grp' column."
-                )
+        # Contacts
+        if "cnt_age" in self.cnt_data.data.columns:
+            self.cnt_data.data["cnt_age_grp"] = bin_ages(
+                self.cnt_data.data["cnt_age"], self.age_group_specs
+            )
+        elif "cnt_age_grp" not in self.cnt_data.data.columns:
+            raise ValueError(
+                "ContactData must have either 'cnt_age' or 'cnt_age_grp' column."
+            )
 
     def _load(self) -> None:
         """
@@ -761,7 +752,12 @@ class SocialMix(DeterministicContactModel):
             self.part_data = validated["part_data"]
             self.cnt_data = validated["cnt_data"]
             self.age_group_specs = validated["age_group_specs"]
+            self.age_processor = AgeBinProcessor(self.age_group_specs)
             self.apply_reciprocity = validated["apply_reciprocity"]
+            # Participants were already dropped at fit time; keep that count.
+            self._cells = dataclasses.replace(
+                validated["cells"], n_dropped=self._cells.n_dropped
+            )
             self._cint = None
             self._rate = None
             # Drop stale age_grp column so _assign_age_groups_to_population()
