@@ -527,6 +527,50 @@ def _sample_eta_truncated(
     return X, Xd
 
 
+def _conditioned_alpha_min(Q: np.ndarray, ext: np.ndarray) -> float:
+    """Smallest ``alpha`` for which the conditioned eta prior is proper.
+
+    Reciprocity ties ``eta^{st}_ab`` to ``eta^{ts}_ba``, so their
+    concentrations must sum to more than 1 for every coordinate:
+
+    - off-diagonal pairs ``a > b``, strata ``s, t``:
+      ``alpha * (Q[b, t] + Q[a, s]) + ext[s, t, a, b] + ext[t, s, b, a] > 1``;
+    - diagonal cells ``a``, strata ``s != t``:
+      ``alpha * (Q[a, t] + Q[a, s]) + ext[s, t, a, a] + ext[t, s, a, a] > 1``.
+
+    Parameters
+    ----------
+    Q : np.ndarray
+        Population shares ``Q[age, stratum]``, shape ``(A, K)``.
+    ext : np.ndarray
+        Summed external concentration terms ``ext[s, t, a, b]``, shape
+        ``(K, K, A, A)``.
+
+    Returns
+    -------
+    float
+        The largest per-coordinate threshold, floored at 0.  The prior is
+        proper for any ``alpha`` strictly greater than this value.
+    """
+    K, A = Q.shape[1], Q.shape[0]
+    ia, ib = np.tril_indices(A, k=-1)
+    dg = np.arange(A)
+    off = ~np.eye(K, dtype=bool)
+
+    # Off-diagonal: entry [n, s, t]
+    q_off = Q[ib][:, np.newaxis, :] + Q[ia][:, :, np.newaxis]
+    e_off = ext[:, :, ia, ib].transpose(2, 0, 1) + ext[:, :, ib, ia].transpose(2, 1, 0)
+    # Diagonal: entry [a, s, t] for s != t
+    q_diag = Q[:, :, np.newaxis] + Q[:, np.newaxis, :]
+    e_diag = ext[:, :, dg, dg].transpose(2, 0, 1)
+    e_diag = e_diag + e_diag.transpose(0, 2, 1)
+
+    thresholds = np.concatenate(
+        [((1 - e_off) / q_off).ravel(), ((1 - e_diag) / q_diag)[:, off].ravel()]
+    )
+    return float(max(0.0, thresholds.max(initial=0.0)))
+
+
 def _sample_eta_conditioned(
     r: np.ndarray,
     c: np.ndarray,
@@ -547,7 +591,8 @@ def _sample_eta_conditioned(
     ``p(X) ∝ prod X[s,t]^(conc_ab[s,t] + conc_ba[t,s] - 2)`` on tables with
     fixed margins.  Tables are updated by margin-preserving 2 x 2 swap moves
     (symmetric moves on the diagonal), each step drawn by shrinkage slice
-    sampling.  See ``docs/dev_docs/sample_eta_sampler.tex``.
+    sampling.  Described in Appendix B of the g-mix paper's supplementary
+    material.
 
     Parameters
     ----------
@@ -591,17 +636,11 @@ def _sample_eta_conditioned(
         else np.inf,
     )
     if worst <= -1:
-        Q_pair = np.concatenate(
-            [
-                (Q[ib][:, np.newaxis, :] + Q[ia][:, :, np.newaxis]).ravel(),
-                (Q[:, :, np.newaxis] + Q[:, np.newaxis, :])[:, ~np.eye(K, dtype=bool)].ravel(),
-            ]
-        )
         raise ValueError(
             f"The eta prior is improper for alpha={alpha}: reciprocity ties "
             "eta^{st}_ab to eta^{ts}_ba, so their concentrations must sum to "
-            f"more than 1 (smallest sum: {worst + 2:.3f}). Without external "
-            f"terms this requires alpha > {1 / Q_pair.min():.3f}."
+            f"more than 1 (smallest sum: {worst + 2:.3f}). This requires "
+            f"alpha > {_conditioned_alpha_min(Q, conc - alpha * Q.T[None, :, None, :]):.3f}."
         )
 
     # Start from the independence tables, which lie strictly inside the bounds
@@ -655,7 +694,7 @@ def sample_eta(
     rng: np.random.Generator | None = None,
     n_sweeps: int = 10,
     progress: bool = False,
-    sampler: Literal["truncated_dirichlet", "conditioned"] = "truncated_dirichlet",
+    sampler: Literal["conditioned", "truncated_dirichlet"] = "conditioned",
     permute_strata: bool = False,
 ) -> Dict[str, np.ndarray]:
     """
@@ -675,7 +714,14 @@ def sample_eta(
     constraints, and its entries lie within the Fréchet bounds.  Two samplers
     of such tables are available:
 
-    ``"truncated_dirichlet"`` (default)
+    ``"conditioned"`` (default)
+        The per-cell Dirichlet at both cells of a pair, conditioned on
+        reciprocity, sampled by slice-within-Gibbs MCMC (described in
+        Appendix B of the g-mix paper's supplementary material).  Symmetric
+        in strata and cells, but approximate for a finite ``n_sweeps``, and
+        only proper when ``alpha * (Q^t_b + Q^s_a)`` plus external terms
+        exceeds 1 for every coordinate.
+    ``"truncated_dirichlet"``
         The table is filled one source stratum (row) at a time.  Each row's
         fractions are drawn from a Dirichlet with concentration
         ``alpha * Q^t_b`` (plus external terms), truncated so that the row
@@ -688,12 +734,6 @@ def sample_eta(
         first carry a truncated Dirichlet prior.  ``permute_strata=True`` draws
         a random order per posterior draw, making the prior symmetric on
         average.
-    ``"conditioned"``
-        The per-cell Dirichlet at both cells of a pair, conditioned on
-        reciprocity, sampled by slice-within-Gibbs MCMC (see
-        ``docs/dev_docs/sample_eta_sampler.tex``).  Symmetric in strata and
-        cells, but approximate for a finite ``n_sweeps``, and only proper for
-        large enough ``alpha``.
 
     Parameters
     ----------
@@ -712,9 +752,11 @@ def sample_eta(
         population sizes via ``_compute_P_sa`` for the Dirichlet concentration.
     alpha : float or None, optional
         Dirichlet precision.  The concentration of source s on target t at
-        cell ``(a, b)`` is ``alpha * Q^t_b``.  If ``None`` (default), 1.0 for
-        ``"truncated_dirichlet"`` and 2.0 for ``"conditioned"``, whose prior
-        is only proper when ``alpha * (Q^t_b + Q^s_a) > 1``.
+        cell ``(a, b)`` is ``alpha * Q^t_b``.  If ``None`` (default): for
+        ``"conditioned"``, the smallest ``alpha`` for which the prior is
+        proper at every coordinate, plus 1 (computed from the population
+        shares and external terms, and reported in a warning); for
+        ``"truncated_dirichlet"``, 1.0.
     external_eta : Dict[str, np.ndarray] or None, optional
         External associativity fractions to add to the concentration,
         shape ``(A, A)`` per ``"source->target"`` key.  If ``None``, ignored.
@@ -728,8 +770,8 @@ def sample_eta(
         ``"truncated_dirichlet"`` only for K >= 3 (K = 2 draws are exact).
     progress : bool, optional
         Show a tqdm progress bar (default False).
-    sampler : {"truncated_dirichlet", "conditioned"}, optional
-        Which sampler to use (default ``"truncated_dirichlet"``).
+    sampler : {"conditioned", "truncated_dirichlet"}, optional
+        Which sampler to use (default ``"conditioned"``).
     permute_strata : bool, optional
         Fill strata in a random order, drawn per posterior draw (default
         False).  Only for ``"truncated_dirichlet"``.
@@ -756,8 +798,6 @@ def sample_eta(
             "permute_strata only applies to sampler='truncated_dirichlet'; the "
             "conditioned prior is already symmetric in the strata."
         )
-    if alpha is None:
-        alpha = 1.0 if sampler == "truncated_dirichlet" else 2.0
     if rng is None:
         rng = np.random.default_rng()
 
@@ -770,12 +810,26 @@ def sample_eta(
     P_sa = _compute_P_sa(dataloader)
     Pt = np.stack([P_sa[t] for t in strata_names], axis=-1)  # (A, K)
     Q = Pt / Pt.sum(axis=-1, keepdims=True)
-    conc = np.broadcast_to(alpha * Q.T[np.newaxis, :, np.newaxis, :], (K, K, A, A)).copy()
+    ext_total = np.zeros((K, K, A, A))
     for ext in (external_eta, external_counts):
         if ext is not None:
-            conc += np.stack(
+            ext_total += np.stack(
                 [np.stack([ext[f"{s}->{t}"] for t in strata_names]) for s in strata_names]
             )
+
+    if alpha is None:
+        if sampler == "truncated_dirichlet":
+            alpha = 1.0
+        else:
+            alpha_min = _conditioned_alpha_min(Q, ext_total)
+            alpha = alpha_min + 1.0
+            warnings.warn(
+                f"alpha=None: using alpha={alpha:.4g} (smallest proper value "
+                f"{alpha_min:.4g} + 1).",
+                UserWarning,
+                stacklevel=2,
+            )
+    conc = alpha * Q.T[np.newaxis, :, np.newaxis, :] + ext_total
 
     ia, ib = np.tril_indices(A, k=-1)  # off-diagonal pairs, a > b
     dg = np.arange(A)

@@ -121,7 +121,7 @@ class Predictor:
         store_eta: bool = False,
         n_sweeps: int = 10,
         progress: bool = True,
-        sampler: Literal["truncated_dirichlet", "conditioned"] = "truncated_dirichlet",
+        sampler: Literal["conditioned", "truncated_dirichlet"] = "conditioned",
         permute_strata: bool = False,
     ) -> Dict[str, NDArray]:
         """
@@ -137,9 +137,10 @@ class Predictor:
         alpha : float or None, optional
             Dirichlet precision for the associativity fraction prior.
             Higher values pull samples toward the population-proportion
-            prior.  If ``None`` (default), 1.0 for the truncated Dirichlet
-            sampler and 2.0 for the conditioned sampler, which needs a large
-            enough ``alpha`` to be proper; see :func:`sample_eta`.
+            prior.  If ``None`` (default): for the conditioned sampler, the
+            smallest ``alpha`` for which its prior is proper, plus 1,
+            computed from the data and reported in a warning; for the
+            truncated Dirichlet sampler, 1.0.  See :func:`sample_eta`.
         rng : numpy.random.Generator or None, optional
             Random number generator.  If ``None``, a new generator is created.
         external_eta : Dict[str, NDArray] or None, optional
@@ -164,12 +165,12 @@ class Predictor:
         progress : bool, optional
             Show a progress bar while the associativity fractions are
             sampled, the slowest step (default ``True``).
-        sampler : {"truncated_dirichlet", "conditioned"}, optional
+        sampler : {"conditioned", "truncated_dirichlet"}, optional
             Prior and sampler for the associativity fractions (default
-            ``"truncated_dirichlet"``); see :func:`sample_eta`.
+            ``"conditioned"``); see :func:`sample_eta`.
         permute_strata : bool, optional
             Fill strata in a random order per posterior draw (default
-            ``False``).  Only for the truncated Dirichlet sampler.
+            ``False``).  Only for ``sampler="truncated_dirichlet"``.
 
         Returns
         -------
@@ -215,7 +216,7 @@ class Predictor:
         store_eta: bool = False,
         n_sweeps: int = 10,
         progress: bool = True,
-        sampler: Literal["truncated_dirichlet", "conditioned"] = "truncated_dirichlet",
+        sampler: Literal["conditioned", "truncated_dirichlet"] = "conditioned",
         permute_strata: bool = False,
     ) -> Union[float, NDArray]:
         """
@@ -241,8 +242,8 @@ class Predictor:
             Passed to :meth:`predict_full_matrices` (default 10).
         progress : bool, optional
             Passed to :meth:`predict_full_matrices` (default ``True``).
-        sampler : {"truncated_dirichlet", "conditioned"}, optional
-            Passed to :meth:`predict_full_matrices`.
+        sampler : {"conditioned", "truncated_dirichlet"}, optional
+            Passed to :meth:`predict_full_matrices` (default ``"conditioned"``).
         permute_strata : bool, optional
             Passed to :meth:`predict_full_matrices` (default ``False``).
 

@@ -11,6 +11,7 @@ from scipy.stats import beta
 from .. import _predict
 from ...models.tests.fixtures import partial_large_sample  # noqa: F401
 from .._predict import (
+    _conditioned_alpha_min,
     feasible_mixing_bounds,
     rtruncated_beta,
     rtruncated_dirichlet,
@@ -340,9 +341,11 @@ class TestFeasibleMixingBounds:
 
 # Sampler configurations whose constraints are checked
 SAMPLERS = [
-    pytest.param({}, id="truncated"),
-    pytest.param({"permute_strata": True}, id="truncated-permuted"),
     pytest.param({"sampler": "conditioned"}, id="conditioned"),
+    pytest.param({"sampler": "truncated_dirichlet"}, id="truncated"),
+    pytest.param(
+        {"sampler": "truncated_dirichlet", "permute_strata": True}, id="truncated-permuted"
+    ),
 ]
 
 
@@ -399,13 +402,29 @@ class TestSampleEta:
             self._eta(setup, alpha=0.5, sampler="conditioned")
 
     def test_truncated_accepts_small_alpha(self, setup):
-        eta = self._eta(setup, alpha=0.5)
+        eta = self._eta(setup, alpha=0.5, sampler="truncated_dirichlet")
         assert all(np.isfinite(v).all() for v in eta.values())
 
-    @pytest.mark.parametrize("sampler, default", [("truncated_dirichlet", 1.0), ("conditioned", 2.0)])
-    def test_alpha_default_per_sampler(self, setup, sampler, default):
-        implicit = self._eta(setup, sampler=sampler)
-        explicit = self._eta(setup, sampler=sampler, alpha=default)
+    def test_default_sampler_is_conditioned(self, setup):
+        default = self._eta(setup, alpha=3.0)
+        conditioned = self._eta(setup, alpha=3.0, sampler="conditioned")
+
+        assert all(np.array_equal(default[k], conditioned[k]) for k in default)
+
+    def test_alpha_default_conditioned(self, setup, P_sa):
+        Pt = np.stack([P_sa[s] for s in LABELS], axis=-1)
+        Q = Pt / Pt.sum(axis=-1, keepdims=True)
+        expected = _conditioned_alpha_min(Q, np.zeros((2, 2, A, A))) + 1.0
+
+        with pytest.warns(UserWarning, match="alpha=None: using alpha="):
+            implicit = self._eta(setup, sampler="conditioned")
+        explicit = self._eta(setup, sampler="conditioned", alpha=expected)
+
+        assert all(np.array_equal(implicit[k], explicit[k]) for k in implicit)
+
+    def test_alpha_default_truncated(self, setup):
+        implicit = self._eta(setup, sampler="truncated_dirichlet")
+        explicit = self._eta(setup, sampler="truncated_dirichlet", alpha=1.0)
 
         assert all(np.array_equal(implicit[k], explicit[k]) for k in implicit)
 
@@ -567,7 +586,9 @@ def _k2_eta(monkeypatch, n, swap=False, **kwargs):
 def test_sample_eta_truncated_k2_is_truncated_beta(monkeypatch):
     """The first stratum's fraction is Beta(alpha Q) truncated to its Fréchet bounds."""
     n = 40_000
-    eta = _k2_eta(monkeypatch, n, rng=np.random.default_rng(3))
+    eta = _k2_eta(
+        monkeypatch, n, rng=np.random.default_rng(3), sampler="truncated_dirichlet"
+    )
     x = eta["M->F"][:, 1, 0]
 
     Q = np.stack([K2_P["M"], K2_P["F"]], axis=-1)
@@ -583,11 +604,32 @@ def test_sample_eta_truncated_k2_is_truncated_beta(monkeypatch):
 def test_sample_eta_permuted_is_label_symmetric(monkeypatch):
     """With permute_strata, swapping the stratum labels swaps the results."""
     n = 40_000
-    eta = _k2_eta(monkeypatch, n, rng=np.random.default_rng(4), permute_strata=True)
-    eta_swapped = _k2_eta(
-        monkeypatch, n, swap=True, rng=np.random.default_rng(5), permute_strata=True
-    )
+    kwargs = {"sampler": "truncated_dirichlet", "permute_strata": True}
+    eta = _k2_eta(monkeypatch, n, rng=np.random.default_rng(4), **kwargs)
+    eta_swapped = _k2_eta(monkeypatch, n, swap=True, rng=np.random.default_rng(5), **kwargs)
 
     x, y = eta["M->F"][:, 1, 0], eta_swapped["F->M"][:, 1, 0]
     se = np.sqrt(x.var() / n + y.var() / n)
     assert abs(x.mean() - y.mean()) < 4 * se
+
+
+def test_conditioned_alpha_min(monkeypatch):
+    """Smallest proper alpha is the largest per-coordinate threshold."""
+    Q = np.array([[0.4, 0.6], [0.7, 0.3]])  # Q[age, stratum], two ages
+    K, A2 = 2, 2
+    ext = np.zeros((K, K, A2, A2))
+
+    # Off-diagonal pair (a, b) = (1, 0): Q[b, t] + Q[a, s]; diagonal: Q[a, t] + Q[a, s], s != t
+    sums = [Q[0, t] + Q[1, s] for s in range(K) for t in range(K)]
+    sums += [Q[a, 0] + Q[a, 1] for a in range(A2)]
+    expected = max(1 / q for q in sums)
+
+    assert _conditioned_alpha_min(Q, ext) == pytest.approx(expected)
+    assert _conditioned_alpha_min(Q, ext + 5.0) == 0.0
+
+    # Proper just above the threshold, improper below it
+    monkeypatch.setattr(_predict, "_compute_P_sa", lambda dataloader: {"M": Q[:, 0], "F": Q[:, 1]})
+    z = {"M": np.full((1, A2, A2), 100.0), "F": np.full((1, A2, A2), 100.0)}
+    sample_eta(z, None, None, None, alpha=expected + 1.0, rng=np.random.default_rng(0))
+    with pytest.raises(ValueError, match="improper"):
+        sample_eta(z, None, None, None, alpha=0.99 * expected, rng=np.random.default_rng(0))
