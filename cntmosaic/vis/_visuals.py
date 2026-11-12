@@ -201,6 +201,7 @@ def plot_mosaic_pixilated(
     color_reverse: bool = True,
     color_min: Optional[float] = None,
     color_max: Optional[float] = None,
+    color_mid: Optional[float] = None,
     show_x_ticks: bool = True,
     show_x_label: bool = True,
     show_y_ticks: bool = True,
@@ -232,6 +233,8 @@ def plot_mosaic_pixilated(
         Whether to reverse the color scheme. Default is True.
     color_min, color_max : float, optional
         Fixed domain bounds for the color scale. Both must be set to take effect.
+    color_mid : float, optional
+        Midpoint for the color scale. Useful for diverging color schemes.
     show_x_ticks : bool, optional
         Whether to show x-axis tick marks and tick labels. Default is True.
     show_x_label : bool, optional
@@ -247,7 +250,10 @@ def plot_mosaic_pixilated(
     alt.data_transformers.disable_max_rows()
 
     # Resolve ContactSummary input
-    from ..analysis.summariser._summary import ContactSummary  # lazy to avoid circular import
+    from ..analysis.summariser._summary import (
+        ContactSummary,
+    )  # lazy to avoid circular import
+
     if isinstance(matrix, ContactSummary):
         resolved_specs = age_group_specs or matrix.age_group_specs
         if resolved_specs is None:
@@ -257,9 +263,7 @@ def plot_mosaic_pixilated(
         age_group_specs = resolved_specs
         matrix = matrix.central
     elif age_group_specs is None:
-        raise ValueError(
-            "age_group_specs is required when matrix is an np.ndarray."
-        )
+        raise ValueError("age_group_specs is required when matrix is an np.ndarray.")
 
     default_config = _default_style(label_angle_x=-45)
     _merge_style(default_config, style_config)
@@ -287,9 +291,12 @@ def plot_mosaic_pixilated(
     ]
     expression = generate_vega_expression(tick_pos, tick_labels)
 
-    color_scale_kwargs: dict = {"scheme": color_scheme, "reverse": color_reverse}
+    default_config["color_scale"] = {"scheme": color_scheme, "reverse": color_reverse}
+    _merge_style(default_config, style_config)
+    if color_mid is not None:
+        default_config["color_scale"]["domainMid"] = color_mid
     if color_min is not None and color_max is not None:
-        color_scale_kwargs["domain"] = [color_min, color_max]
+        default_config["color_scale"]["domain"] = [color_min, color_max]
 
     chart = (
         alt.Chart(source)
@@ -320,7 +327,7 @@ def plot_mosaic_pixilated(
             ),
             color=alt.Color(
                 "z:Q",
-                scale=alt.Scale(**color_scale_kwargs),
+                scale=alt.Scale(**default_config["color_scale"]),
                 title=zlabel,
                 legend=alt.Legend(**default_config["legend"]) if zlabel else None,
             ),
@@ -407,5 +414,3 @@ def plot_mosaic_marginal(
     return chart.properties(
         width=width, height=height, title=alt.TitleParams(text=title, **config["title"])
     )
-
-

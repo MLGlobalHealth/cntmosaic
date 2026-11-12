@@ -126,20 +126,25 @@ class SocialMixDataLoader:
             )
 
     def _compute_Y(self) -> None:
+        """Compute the (unweighted) contact count array and store it as ``Y``."""
+        self.sm.Y = self.compute_Y_array()
+
+    def compute_Y_array(self, part_weights: Optional[pd.Series] = None) -> NDArray:
         """
-        Compute contact count matrix with stratification.
+        Compute the contact count array with stratification.
 
-        When ``part_data.weight_col`` is set, each contact record is multiplied
-        by the participant's survey weight before summation.  If
-        ``self.sm.normalise_weights`` is True, weights are first normalized
-        within each (age_group, stratum) cell so that
-        ``sum(w_i in cell) == N_cell``, preserving the contact intensity
-        estimator ``M = Y / N``. When False (the default), the raw weights
-        supplied by the user are used as-is.
+        Parameters
+        ----------
+        part_weights : pd.Series, optional
+            Weight per participant, indexed by participant id. When given,
+            each contact counts ``w_i`` instead of 1, so the result holds
+            weighted sums ``sum_i w_i y_id``. The loader holds no weight state
+            itself; callers pass weights explicitly (``Prem2`` shares this
+            loader and never does).
 
-        Sets
-        ----
-        self.sm.Y : NDArray
+        Returns
+        -------
+        NDArray
             - Shape (C, D) if K_part == 1 and K_cnt == 1 (no stratification)
             - Shape (K_part, C, D) if K_part > 1 and K_cnt == 1 (partial)
             - Shape (K_part, K_cnt, C, D) if both K_part > 1 and K_cnt > 1 (full/mixed)
@@ -149,22 +154,10 @@ class SocialMixDataLoader:
         age_grps_part = df_part["part_age_grp"].cat.categories
         age_grps_cnt = df_cnt["cnt_age_grp"].cat.categories
 
-        # Normalize weights within (age_group, stratum) cells when present,
-        # unless the caller opted out via SocialMix(normalise_weights=False).
-        has_weights = self.sm.part_data.weight_col is not None
-        if has_weights and self.sm.normalise_weights:
-            grp_cols = ["part_age_grp"] + [
-                f"part_{v}" for v in self.sm.strat_vars_part
-            ]
-            if not self.sm.part_data.check_weights_normalized(grp_cols):
-                self.sm.part_data.normalize_weights(grp_cols)
-
         # Merge participants with contacts
         part_cols = ["id", "part_age_grp"] + [
             f"part_{v}" for v in self.sm.strat_vars_part
         ]
-        if has_weights:
-            part_cols.append("part_weight")
         merged = df_cnt.merge(df_part[part_cols], on="id", how="inner")
 
         if len(merged) == 0:
@@ -173,11 +166,13 @@ class SocialMixDataLoader:
                 "Check that contact IDs match participant IDs."
             )
 
-        # Create the column to aggregate: weighted or raw contact counts
-        if has_weights:
-            merged["_y"] = merged["y"] * merged["part_weight"]
-        else:
+        if part_weights is None:
             merged["_y"] = merged["y"]
+        else:
+            w = merged["id"].map(part_weights)
+            if w.isna().any():
+                raise ValueError("Missing participant weights for some contacts.")
+            merged["_y"] = merged["y"] * w.to_numpy(dtype=np.float64)
 
         if self.sm.K_part == 1 and self.sm.K_cnt == 1:
             # No stratification: simple (C, D) matrix
@@ -191,7 +186,7 @@ class SocialMixDataLoader:
                 columns=pd.Index(age_grps_cnt),
                 fill_value=0,
             )
-            self.sm.Y = Y_df.values.astype(np.float64)
+            return Y_df.values.astype(np.float64)
 
         elif self.sm.K_part > 1 and self.sm.K_cnt == 1:
             # Partial stratification: (K_part, C, D) tensor
@@ -201,7 +196,7 @@ class SocialMixDataLoader:
             ]
             Y_agg = merged.groupby(group_cols, observed=False)["_y"].sum()
 
-            self.sm.Y = self._fill_partial_array(
+            return self._fill_partial_array(
                 Y_agg,
                 shape=(self.sm.K_part, self.sm.C, self.sm.D),
                 strat_vars_part=self.sm.strat_vars_part,
@@ -217,7 +212,7 @@ class SocialMixDataLoader:
             )
             Y_agg = merged.groupby(group_cols, observed=False)["_y"].sum()
 
-            self.sm.Y = self._fill_full_array(
+            return self._fill_full_array(
                 Y_agg,
                 shape=(self.sm.K_part, self.sm.K_cnt, self.sm.C, self.sm.D),
                 strat_vars_part=self.sm.strat_vars_part,

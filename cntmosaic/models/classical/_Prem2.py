@@ -116,11 +116,9 @@ class Prem2(Prem2NumPyroMixin, ContactModel):
         self.age_group_specs = age_group_specs
         self.likelihood = likelihood
 
-        # Fixed internal-only attributes so SocialMixDataLoader (reused for
-        # _load) works unmodified — Prem2 has no pop_data/normalise_weights
-        # concept.
+        # Fixed internal-only attribute so SocialMixDataLoader (reused for
+        # _load) works unmodified — Prem2 has no pop_data concept.
         self.pop_data = None
-        self.normalise_weights = False
 
         # Stratification attributes (initialized in _preprocess)
         self.strat_vars_part: List[str] = []

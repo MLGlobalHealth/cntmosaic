@@ -197,3 +197,12 @@ def test_copy_container_keeps_columns_and_does_not_share_data():
     assert list(copied.data.columns) == list(part.data.columns)
     copied.data["extra"] = 1
     assert "extra" not in part.data.columns
+
+
+def test_normalise_weights_argument_is_gone():
+    """`normalise_weights` was removed with `weight_col` (dev plan D15, D28)."""
+    part, cnt = _survey(np.tile(np.arange(20), 3))
+    with pytest.raises(TypeError, match="normalise_weights"):
+        SocialMix(part, cnt, SPECS, normalise_weights=True)
+    with pytest.raises(TypeError, match="normalise_weights"):
+        SocialMix.from_dataframes(part.data, cnt.data, SPECS, normalise_weights=True)

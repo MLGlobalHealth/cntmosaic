@@ -54,16 +54,6 @@ class ContactSurveyLoader:
         (V) before use as log-offsets. Bandwidth selected by leave-one-out
         cross-validation.
 
-    Notes
-    -----
-    When the underlying ``ParticipantData`` was constructed with a
-    ``weight_col``, survey weights are automatically applied: ``y`` in the
-    returned ``ModelData`` will be a real-valued weighted sum rather than an
-    integer count. In that case use ``likelihood='quasipoisson'`` or
-    ``likelihood='quasinegbin'`` — the standard Poisson and Negative Binomial
-    likelihoods require integer responses and are not appropriate for weighted
-    data. A ``UserWarning`` is raised by ``load()`` as a reminder.
-
     Attributes
     ----------
     col_map : ColumnSpec
@@ -132,8 +122,7 @@ class ContactSurveyLoader:
         df_V = build_contact_offsets(
             self.data, self.col_map, self.smooth_amb_cnt_offsets
         )
-        weight_col = "part_weight" if "part_weight" in self.data.columns else None
-        df_y = build_contact_counts(self.data, self.col_map, weight_col=weight_col)
+        df_y = build_contact_counts(self.data, self.col_map)
         return build_observation_grid(
             self.data, self.col_map, self.min_age, self.max_age, df_n, df_y, df_V
         )
@@ -218,16 +207,6 @@ class ContactSurveyLoader:
             rid=rid,
             **strat_kwargs,
         )
-
-        if "part_weight" in self.data.columns:
-            warnings.warn(
-                "Survey weights are active: 'y' contains weighted (non-integer) contact "
-                "counts. The standard Poisson and Negative Binomial likelihoods assume "
-                "integer-valued responses and are not appropriate for weighted data. "
-                "Use likelihood='quasipoisson' or likelihood='quasinegbin' instead.",
-                UserWarning,
-                stacklevel=2,
-            )
 
         return self.model_data
 

@@ -384,3 +384,108 @@ class TestEdgeCases:
         df = pd.DataFrame({"id": [1, 2, 3], "age": [25.5, 34.2, 45.8]})
         part_data = ParticipantData(data=df, id_col="id", age_col="age")
         assert part_data.age_range == (25.5, 45.8)
+
+
+# =====================
+# 5. Removed API (dev plan D15, D28)
+# =====================
+
+
+class TestRemovedWeightApi:
+    """`weight_col` and its normalisation helpers were removed cleanly."""
+
+    def test_weight_col_argument_is_gone(self):
+        df = pd.DataFrame({"id": [1, 2], "age": [20, 30], "w": [1.0, 2.0]})
+        with pytest.raises(TypeError, match="weight_col"):
+            ParticipantData(data=df, id_col="id", age_col="age", weight_col="w")
+
+    def test_normalisation_methods_are_gone(self):
+        assert not hasattr(ParticipantData, "normalize_weights")
+        assert not hasattr(ParticipantData, "check_weights_normalized")
+
+
+# =====================
+# 6. Auxiliary columns (dev plan: ParticipantData(aux_cols=...))
+# =====================
+
+
+class TestAuxCols:
+    """Auxiliary columns are kept for weighting: prefixed, not strata, NaN kept."""
+
+    def _df(self):
+        return pd.DataFrame(
+            {
+                "pid": [1, 2, 3, 4],
+                "age": [10, 20, np.nan, 40],
+                "sex": ["F", "M", "F", "M"],
+                "dayofweek": [1.0, np.nan, 6.0, 0.0],
+                "country": ["UK", None, "DE", "UK"],
+                "w": [1.5, 2.0, 0.5, 1.0],
+            }
+        )
+
+    def test_kept_renamed_and_not_strata(self):
+        part = ParticipantData(
+            self._df(), id_col="pid", age_col="age", strat_var_cols="sex",
+            aux_cols=["dayofweek", "country", "w"],
+        )
+        for col in ("part_dayofweek", "part_country", "part_w"):
+            assert col in part.data.columns
+        assert part.strat_vars == ["sex"]
+        assert part.get_aux_cols() == ["part_dayofweek", "part_country", "part_w"]
+        assert part.get_aux_cols(prefix=False) == ["dayofweek", "country", "w"]
+
+    def test_missing_values_kept_and_rows_aligned(self):
+        with pytest.warns(UserWarning, match="Dropped 1 row"):
+            part = ParticipantData(
+                self._df(), id_col="pid", age_col="age", aux_cols=["dayofweek", "w"]
+            )
+        # Only the row with a missing age (a required column) is dropped.
+        assert part.data["id"].tolist() == [1, 2, 4]
+        assert part.data["part_dayofweek"].isna().tolist() == [False, True, False]
+        assert part.data["part_w"].tolist() == [1.5, 2.0, 1.0]
+
+    def test_object_aux_becomes_categorical_with_nan(self):
+        part = ParticipantData(self._df(), id_col="pid", age_col="age", aux_cols="country")
+        assert isinstance(part.data["part_country"].dtype, pd.CategoricalDtype)
+        assert part.data["part_country"].isna().sum() == 1
+
+    def test_without_aux_cols_unchanged(self):
+        part = ParticipantData(self._df(), id_col="pid", age_col="age")
+        assert part.get_aux_cols() == []
+        assert "part_dayofweek" not in part.data.columns
+
+    def test_duplicate_index_is_aligned(self):
+        df = self._df().dropna(subset=["age"])
+        df.index = [0, 0, 1]
+        part = ParticipantData(df, id_col="pid", age_col="age", aux_cols="w")
+        assert part.data["part_w"].tolist() == [1.5, 2.0, 1.0]
+
+    def test_missing_column(self):
+        with pytest.raises(KeyError, match="aux_cols"):
+            ParticipantData(self._df(), id_col="pid", age_col="age", aux_cols="nope")
+
+    def test_duplicates(self):
+        with pytest.raises(ValueError, match="more than once"):
+            ParticipantData(self._df(), id_col="pid", age_col="age", aux_cols=["w", "w"])
+
+    @pytest.mark.parametrize("aux", ["sex", "age", "pid"])
+    def test_overlap_with_declared_columns(self, aux):
+        with pytest.raises(ValueError, match="already declared"):
+            ParticipantData(
+                self._df(), id_col="pid", age_col="age", strat_var_cols="sex",
+                aux_cols=aux,
+            )
+
+    def test_reserved_name(self):
+        df = self._df().rename(columns={"w": "repeat"})
+        with pytest.raises(ValueError, match="reserved"):
+            ParticipantData(df, id_col="pid", age_col="age", aux_cols="repeat")
+
+    def test_clash_after_prefixing(self):
+        df = self._df()
+        df["part_sex"] = df["sex"]
+        with pytest.raises(ValueError, match="clash"):
+            ParticipantData(
+                df, id_col="pid", age_col="age", strat_var_cols="sex", aux_cols="part_sex"
+            )

@@ -836,3 +836,28 @@ class TestStratificationOrdering:
                 f"Row {i}: Expected '{expected_label}' but got '{actual_label}' "
                 f"(flat_ix={flat_ix[i]})"
             )
+
+
+class TestAuxColsBayesianPath:
+    """Missing values in auxiliary columns must not drop rows anywhere in the
+    Bayesian data path (DataFrameSurveySource merges all participant columns)."""
+
+    def test_aux_nan_does_not_change_model_data(self, data_single):
+        df_part, df_cnt, df_pop = data_single
+        df_aux = df_part.copy()
+        rng = np.random.default_rng(0)
+        df_aux["dayofweek"] = rng.integers(0, 7, len(df_aux)).astype(float)
+        df_aux.loc[df_aux.index[::5], "dayofweek"] = np.nan
+
+        def load(df, **kwargs):
+            part = ParticipantData(data=df, id_col="id", age_col="age", **kwargs)
+            cnt = ContactData(data=df_cnt, id_col="id", age_col="cnt_age")
+            pop = PopulationData(data=df_pop, age_col="age", size_col="P")
+            return ContactSurveyLoader.from_containers(part, cnt, pop).load()
+
+        plain = load(df_part)
+        with_aux = load(df_aux, aux_cols="dayofweek")
+        np.testing.assert_array_equal(with_aux.y, plain.y)
+        np.testing.assert_array_equal(with_aux.aid, plain.aid)
+        np.testing.assert_array_equal(with_aux.bid, plain.bid)
+        np.testing.assert_allclose(with_aux.log_N, plain.log_N)

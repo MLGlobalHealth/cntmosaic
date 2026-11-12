@@ -21,7 +21,6 @@ def validate_participant_data(
     age_grp_col: Optional[str],
     repeat_col: Optional[str],
     amb_cnt_col: Optional[str],
-    weight_col: Optional[str] = None,
 ) -> None:
     """
     Run all domain validation checks on a preprocessed participant DataFrame.
@@ -45,9 +44,6 @@ def validate_participant_data(
         Original repeat-interview column name; truthy when present.
     amb_cnt_col : Optional[str]
         Original ambiguous-contact-count column name; truthy when present.
-    weight_col : Optional[str]
-        Original weight column name; truthy when individual-level weights are
-        present.
 
     Raises
     ------
@@ -55,7 +51,6 @@ def validate_participant_data(
         If duplicate participant IDs are found.
         If age / repeat / ambiguous-count values are invalid (negative or
         non-numeric).
-        If weight values are non-numeric or not strictly positive.
     TypeError
         If age-group column is not categorical with pd.IntervalIndex categories.
     """
@@ -75,9 +70,6 @@ def validate_participant_data(
 
     if amb_cnt_col:
         _validate_amb_cnt(data, amb_cnt_col)
-
-    if weight_col:
-        _validate_weights(data)
 
 
 # ---------------------------------------------------------------------------
@@ -172,24 +164,4 @@ def _validate_amb_cnt(data: pd.DataFrame, amb_cnt_col: str) -> None:
             f"Group contact count column '{amb_cnt_col}' contains negative values.\n"
             f"  Rows with negative values: {negative_indices}\n"
             f"  Values: {grp_counts[grp_counts < 0].head().tolist()}"
-        )
-
-
-def _validate_weights(data: pd.DataFrame) -> None:
-    """Raise ValueError if 'part_weight' is non-numeric or not strictly positive."""
-    weights = data["part_weight"]
-
-    if not pd.api.types.is_numeric_dtype(weights):
-        raise ValueError(
-            f"Weight column 'part_weight' must contain numeric values.\n"
-            f"  Current dtype: {weights.dtype}\n"
-            f"  Hint: convert weights to float type."
-        )
-
-    if (weights <= 0).any():
-        invalid_indices = data[weights <= 0].index[:5].tolist()
-        raise ValueError(
-            f"Weight column 'part_weight' must contain strictly positive values.\n"
-            f"  Rows with non-positive weights: {invalid_indices}\n"
-            f"  Values: {weights[weights <= 0].head().tolist()}"
         )

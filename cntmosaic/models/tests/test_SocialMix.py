@@ -94,7 +94,15 @@ class TestInstantiation:
             UserWarning,
             match="Reciprocity adjustment is not applicable for partial stratification",
         ):
-            _from_containers(partial_multi_strat_large_sample)
+            _from_containers(partial_multi_strat_large_sample, apply_reciprocity=True)
+
+    def test_reciprocity_off_by_default(self, single_large_sample):
+        sm = _from_containers(single_large_sample)
+        assert sm.apply_reciprocity is False
+        sm_off = _from_containers(single_large_sample, apply_reciprocity=False)
+        np.testing.assert_array_equal(
+            sm.cint()["All->All"].central, sm_off.cint()["All->All"].central
+        )
 
 
 # ============================================================================

@@ -61,7 +61,7 @@ class SocialMixValidator:
         cnt_data: ContactData,
         age_group_specs: AgeGroupSpecs,
         pop_data: Optional[PopulationData] = None,
-        apply_reciprocity: bool = True,
+        apply_reciprocity: bool = False,
         adaptive_merge: bool = False,
         validate_for_bootstrap: bool = False,
     ):
@@ -408,10 +408,15 @@ class SocialMixValidator:
         accounting for both age groups and participant stratification variables.
 
         Strategy:
-        1. Groups by strat_vars_part + age_grp_part to get counts for each (stratum, age) combination
-        2. Identifies age groups that are empty in ANY stratum (must be globally merged)
-        3. Calculates failure probability using Bonferroni union bound (sum across all strata)
-        4. If adaptive_merge=True, recursively merges age groups until failure probability is acceptable
+        1. Group by strat_vars_part + part_age_grp to get the count n_{s,c}
+           for each (stratum s, age group c).
+        2. Find age groups that are empty in ANY stratum. If adaptive_merge=True
+           they are merged globally; otherwise a ValueError is raised.
+        3. Bound the probability that a resample leaves some cell empty by
+           sum over (s, c) of exp(-n_{s,c}) (Bonferroni union bound).
+        4. While that bound is at least 5e-5, merge the age group with the
+           smallest count (its minimum over strata) with the smaller of its
+           neighbours. This step runs regardless of adaptive_merge.
 
         Notes
         -----

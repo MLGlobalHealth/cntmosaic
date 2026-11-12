@@ -1,8 +1,7 @@
 """
 Social Contact Matrix Estimation
 
-This module implements the socialmixr algorithm for estimating age-structured
-social contact matrices from survey data. Based on Funk et al. (2024).
+This module estimates age-structured social contact matrices from survey data.
 
 Key Features:
 - Contact intensity and rate matrix estimation
@@ -30,6 +29,8 @@ from ._socialmix_bootstrap import BootstrapResults, SocialMixBootstrap
 from ._socialmix_helpers import apply_reciprocity, create_stratum_labels, infer_strat_mode
 from ._socialmix_utils import SocialMixDataLoader
 from ._socialmix_validation import SocialMixValidator
+from ...weights import BindContext, WeightResult, WeightSpecs
+from ...weights._warnings import warn as warn_weights
 
 # ============================================================================
 # Main Class
@@ -40,19 +41,15 @@ class SocialMix(DeterministicContactModel):
     """
     Estimate age-structured social contact matrices from survey data.
 
-    Implements the socialmixr algorithm (Funk et al. 2024) for computing
-    contact intensity and contact rate matrices from participant and contact
-    survey data, with optional reciprocity adjustment and bootstrap uncertainty
-    quantification.
+    Computes contact intensity and contact rate matrices from participant and
+    contact survey data, with optional reciprocity adjustment and bootstrap
+    uncertainty quantification.
 
     Parameters
     ----------
     part_data : ParticipantData
         Validated participant data container. Must have either a ``part_age``
         (1-year resolution) or ``part_age_grp`` (coarse intervals) column.
-        When ``part_data.weight_col`` is set, contact counts in ``Y`` are
-        weighted by individual survey weights, normalized within each
-        age-group / stratum cell.
     cnt_data : ContactData
         Validated contact data container. Must have either a ``cnt_age`` or
         ``cnt_age_grp`` column, and a ``y`` column with contact counts.
@@ -65,22 +62,26 @@ class SocialMix(DeterministicContactModel):
         computation and reciprocity adjustment. When provided with 1-year
         resolution (``age_col``), counts are silently aggregated into coarse
         bins matching ``age_group_specs``.
-    apply_reciprocity : bool, default True
+    apply_reciprocity : bool, default False
         Apply population-weighted reciprocity adjustment so that
-        ``M[c,d] * P[c] == M[d,c] * P[d]``. Automatically disabled if
-        ``pop_data`` is not provided or stratification mode is incompatible
-        (partial/mixed).
+        ``M[c,d] * P[c] == M[d,c] * P[d]``. Off by default: whether the
+        adjustment is appropriate depends on the analysis. Automatically
+        disabled if ``pop_data`` is not provided or stratification mode is
+        incompatible (partial/mixed).
     adaptive_merge : bool, default False
         Automatically merge age groups with zero participants to prevent
         division-by-zero errors. When ``False`` and empty groups are detected,
-        a ``ValueError`` is raised instead.
-    normalise_weights : bool, default False
-        Only relevant when ``part_data.weight_col`` is set. When ``True``,
-        survey weights are rescaled within each (age_group, stratum) cell so
-        that ``sum(w_i in cell) == N_cell`` before being applied to ``Y``,
-        preserving the contact intensity estimator ``M = Y / N``. When
-        ``False`` (the default), the raw weights supplied by the user are
-        used as-is, without rescaling to the cell sample size.
+        a ``ValueError`` is raised instead. This flag applies only to empty
+        age groups. :meth:`run_inference_bootstrap` also merges age groups
+        that are too small for stable resampling, whatever the value of this
+        flag.
+    weight_specs : WeightSpecs, optional
+        Participant weights (see :mod:`cntmosaic.weights`). Weighting is
+        opt-in: without ``weight_specs`` the estimate is unweighted. With it,
+        the weights are computed on the fitted participants and cells, and
+        :meth:`cint` / :meth:`rate` return the weighted estimate
+        ``M[c,d] = sum_i w_i y_id / sum_i w_i`` by default; the unweighted
+        estimate stays available through ``weighted=False``.
 
     Attributes
     ----------
@@ -103,12 +104,17 @@ class SocialMix(DeterministicContactModel):
     strat_mode : str
         Stratification mode: ``"single"``, ``"partial"``, ``"full"``, or
         ``"mixed"``.
+    Y_w, W : NDArray or None
+        Weighted counterparts of ``Y`` and ``N`` (``sum_i w_i y_id`` and
+        ``sum_i w_i``), or ``None`` without ``weight_specs``.
+    weights : WeightResult or None
+        Weight diagnostics, or ``None`` without ``weight_specs``.
 
     Methods
     -------
-    cint()
+    cint(weighted=None)
         Compute the contact intensity matrix M[c,d].
-    rate()
+    rate(weighted=None)
         Compute the contact rate matrix ω[c,d] = M[c,d] / P[d].
     run_inference_bootstrap(n_boot, random_state, progress, min_success_rate)
         Quantify uncertainty via bootstrap resampling.
@@ -134,6 +140,16 @@ class SocialMix(DeterministicContactModel):
     >>> boot = sm.run_inference_bootstrap(n_boot=1000, random_state=42)
     >>> M_mean = boot.mean(statistic="cint")["All->All"]
     >>> M_ci = boot.quantiles(q=[0.025, 0.975], statistic="cint")["All->All"]
+    >>>
+    >>> # Participant weights (opt-in; see cntmosaic.weights)
+    >>> from cntmosaic.weights import WeightSpecs, DayOfWeekWeights
+    >>> part_data = ParticipantData(df_part, id_col="part_id", age_col="part_age",
+    ...                             aux_cols="dayofweek")
+    >>> sm_w = SocialMix(part_data, cnt_data, age_bins, pop_data,
+    ...                  weight_specs=WeightSpecs(DayOfWeekWeights()))
+    >>> sm_w.cint()                  # weighted
+    >>> sm_w.cint(weighted=False)    # unweighted, same fit
+    >>> sm_w.weights.cells           # weight diagnostics per cell
 
     Notes
     -----
@@ -146,14 +162,6 @@ class SocialMix(DeterministicContactModel):
 
     The reciprocity adjustment ensures ``M[c,d] * P[c] == M[d,c] * P[d]``,
     i.e. total contacts are symmetric across the population.
-
-    If ``part_data`` carries a ``weight_col``, each contact record is
-    multiplied by the participant's survey weight before aggregation, so that
-    ``Y[c,d] = sum_i( w_i * y_i_d )``. When ``normalise_weights=True``, weights
-    are first rescaled by
-    :meth:`~cntmosaic.dataloader.ParticipantData.normalize_weights` so that
-    ``sum_i(w_i in cell c) == N[c]``; when ``False`` (the default), the raw
-    weights are used unmodified.
     """
 
     def __init__(
@@ -162,10 +170,15 @@ class SocialMix(DeterministicContactModel):
         cnt_data: ContactData,
         age_group_specs: AgeGroupSpecs,
         pop_data: Optional[PopulationData] = None,
-        apply_reciprocity: bool = True,
+        apply_reciprocity: bool = False,
         adaptive_merge: bool = False,
-        normalise_weights: bool = False,
+        weight_specs: Optional[WeightSpecs] = None,
     ):
+        if weight_specs is not None and not isinstance(weight_specs, WeightSpecs):
+            raise TypeError(
+                f"weight_specs must be a WeightSpecs or None; got {type(weight_specs).__name__}."
+            )
+
         # Store parameters
         self.part_data = part_data
         self.cnt_data = cnt_data
@@ -173,7 +186,7 @@ class SocialMix(DeterministicContactModel):
         self.pop_data = pop_data
         self.apply_reciprocity = apply_reciprocity
         self.adaptive_merge = adaptive_merge
-        self.normalise_weights = normalise_weights
+        self.weight_specs = weight_specs
 
         # Stratification attributes (initialized in _preprocess)
         self.strat_vars_part: List[str] = []
@@ -191,10 +204,17 @@ class SocialMix(DeterministicContactModel):
         self.age_processor = AgeBinProcessor(age_group_specs)
 
         # Computed attributes (initialized in pipeline)
-        self._cint: Optional[NDArray] = None
-        self._rate: Optional[NDArray] = None
+        # cint / rate caches, one entry per value of ``weighted``
+        self._cint: Dict[bool, Dict[str, ContactSummary]] = {}
+        self._rate: Dict[bool, Dict[str, ContactSummary]] = {}
         self._boot: Optional[BootstrapResults] = None
         self._cells = None  # ParticipantCells, set in _preprocess
+
+        # Weights (set in _fit_weights when weight_specs is given)
+        self._bound = None  # private _BoundWeightSpecs
+        self._weight_result: Optional[WeightResult] = None
+        self.Y_w: Optional[NDArray] = None  # sum_i w_i y_id
+        self.W: Optional[NDArray] = None  # sum_i w_i per cell
 
         # Data arrays (initialized in _load)
         self.Y: Optional[NDArray] = None  # Contact counts
@@ -219,9 +239,10 @@ class SocialMix(DeterministicContactModel):
         df_cnt: pd.DataFrame,
         age_group_specs: AgeGroupSpecs,
         df_pop: Optional[pd.DataFrame] = None,
-        apply_reciprocity: bool = True,
+        apply_reciprocity: bool = False,
         adaptive_merge: bool = False,
-        normalise_weights: bool = False,
+        weight_specs: Optional[WeightSpecs] = None,
+        aux_cols: Optional[Union[List[str], str]] = None,
     ) -> "SocialMix":
         """Construct SocialMix directly from DataFrames, bypassing manual container creation.
 
@@ -236,7 +257,8 @@ class SocialMix(DeterministicContactModel):
         df_part : pd.DataFrame
             Participant DataFrame. Must contain ``id`` and either ``part_age``
             (1-year resolution) or ``part_age_grp`` (coarse intervals).
-            Extra ``part_*`` columns are treated as stratification variables.
+            Extra ``part_*`` columns are treated as stratification variables,
+            except those listed in ``aux_cols``.
         df_cnt : pd.DataFrame
             Contact DataFrame. Must contain ``id``, ``y``, and either ``cnt_age``
             or ``cnt_age_grp``. Extra ``cnt_*`` columns are treated as
@@ -246,20 +268,45 @@ class SocialMix(DeterministicContactModel):
         df_pop : pd.DataFrame, optional
             Population DataFrame. Must contain ``P`` and either ``age``
             (1-year resolution) or ``pop_age_grp`` (coarse intervals).
-        apply_reciprocity : bool, default True
+        apply_reciprocity : bool, default False
             See :class:`SocialMix`.
         adaptive_merge : bool, default False
             See :class:`SocialMix`.
-        normalise_weights : bool, default False
+        weight_specs : WeightSpecs, optional
             See :class:`SocialMix`.
+        aux_cols : str or list of str, optional
+            Participant columns kept for weighting (e.g. ``"part_dayofweek"``
+            or a design-weight column). They are passed to
+            ``ParticipantData(aux_cols=...)`` and are **not** treated as
+            stratification variables.
         """
+        # Resolve each auxiliary name to the column present in df_part (it may
+        # be given with or without the "part_" prefix).
+        aux_list = []
+        for c in [aux_cols] if isinstance(aux_cols, str) else list(aux_cols or []):
+            prefixed = c if c.startswith("part_") else f"part_{c}"
+            if c not in df_part.columns and prefixed in df_part.columns:
+                c = prefixed
+            aux_list.append(c)
+        aux_names = set(aux_list)
         _CORE_PART = {"id", "part_age", "part_age_grp", "part_age_min", "part_age_max"}
         _CORE_CNT = {"id", "cnt_age", "cnt_age_grp", "cnt_age_min", "cnt_age_max", "y"}
         _CORE_POP = {"age", "age_min", "age_max", "P", "pop_age_grp"}
 
         part_strat = [
-            c for c in df_part.columns if c.startswith("part_") and c not in _CORE_PART
+            c
+            for c in df_part.columns
+            if c.startswith("part_") and c not in _CORE_PART and c not in aux_names
         ]
+        float_strat = [c for c in part_strat if pd.api.types.is_float_dtype(df_part[c])]
+        if float_strat:
+            warnings.warn(
+                f"Participant column(s) {float_strat} have a floating-point dtype and "
+                f"will be used as stratification variables. If they are weighting "
+                f"variables (e.g. design weights), pass them in aux_cols instead.",
+                UserWarning,
+                stacklevel=2,
+            )
         cnt_strat = [
             c for c in df_cnt.columns if c.startswith("cnt_") and c not in _CORE_CNT
         ]
@@ -282,6 +329,7 @@ class SocialMix(DeterministicContactModel):
             df_part,
             id_col="id",
             strat_var_cols=part_strat or None,
+            aux_cols=aux_list or None,
             **part_age_kwargs,
         )
         cnt_data = ContactData(
@@ -312,7 +360,7 @@ class SocialMix(DeterministicContactModel):
             pop_data=pop_data,
             apply_reciprocity=apply_reciprocity,
             adaptive_merge=adaptive_merge,
-            normalise_weights=normalise_weights,
+            weight_specs=weight_specs,
         )
 
     # ------------------------------------------------------------------
@@ -324,12 +372,78 @@ class SocialMix(DeterministicContactModel):
         Prepare and load data for matrix estimation.
 
         Runs the full preprocessing and loading pipeline:
+
         1. Assigns age groups to participants / contacts
         2. Validates stratification, reciprocity requirements, and age bins
         3. Aggregates contact counts into Y, N, P arrays
+        4. If ``weight_specs`` is given, computes the weights and the weighted
+           arrays Y_w, W
         """
         self._preprocess()
         self._load()
+        self._fit_weights()
+
+    def _fit_weights(self, warn_user: bool = True) -> None:
+        """Bind ``weight_specs`` to the fitted cells and compute Y_w and W.
+
+        Lives in SocialMix, not in the SocialMixDataLoader shared with Prem2,
+        which gets no weighting (dev plan D27). ``warn_user=False`` is used
+        when rebinding after a bootstrap-time merge, so bind-time warnings
+        are not repeated.
+        """
+        self._bound = None
+        self._weight_result = None
+        self.Y_w = None
+        self.W = None
+        self._cint = {}
+        self._rate = {}
+        if self.weight_specs is None:
+            return
+
+        cells = self._cells
+        ctx = BindContext(
+            part=cells.part.copy(),
+            cell=cells.cell,
+            n_cells=cells.n_cells,
+            cell_labels=cells.cell_labels,
+            ids=cells.ids,
+        )
+        self._bound = self.weight_specs._bind(ctx, warn_user=warn_user)
+        w = self._bound.weights()
+
+        loader = SocialMixDataLoader(self)
+        self.Y_w = loader.compute_Y_array(part_weights=pd.Series(w, index=cells.ids))
+        W = np.bincount(cells.cell, weights=w, minlength=cells.n_cells).reshape(
+            self.K_part, self.C
+        )
+        self.W = W[0] if self.N.ndim == 1 else W
+        if self.W.shape != self.N.shape or self.Y_w.shape != self.Y.shape:
+            raise RuntimeError(
+                "Internal error: weighted arrays do not match the unweighted ones "
+                f"(W {self.W.shape} vs N {self.N.shape}, "
+                f"Y_w {self.Y_w.shape} vs Y {self.Y.shape})."
+            )
+
+    @property
+    def weights(self) -> Optional[WeightResult]:
+        """Weight diagnostics (:class:`~cntmosaic.weights.WeightResult`), or
+        ``None`` when the fit is unweighted."""
+        if self._bound is None:
+            return None
+        if self._weight_result is None:
+            self._weight_result = self._bound.result()
+        return self._weight_result
+
+    def _resolve_weighted(self, weighted: Optional[bool]) -> bool:
+        """``None`` means weighted iff ``weight_specs`` was given."""
+        if weighted is None:
+            return self.weight_specs is not None
+        if weighted and self.weight_specs is None:
+            raise ValueError(
+                "weighted=True requires weight_specs; this SocialMix was fitted "
+                "without weights."
+            )
+        return bool(weighted)
 
     def predict(self) -> Dict[str, NDArray]:
         """
@@ -557,7 +671,7 @@ class SocialMix(DeterministicContactModel):
         )
 
 
-    def cint(self) -> Dict[str, "ContactSummary"]:
+    def cint(self, weighted: Optional[bool] = None) -> Dict[str, "ContactSummary"]:
         """
         Compute contact intensity matrix.
 
@@ -567,6 +681,14 @@ class SocialMix(DeterministicContactModel):
         If apply_reciprocity=True, applies post-hoc reciprocity adjustment
         to ensure contact symmetry (for single/full stratification modes).
 
+        Parameters
+        ----------
+        weighted : bool, optional
+            ``None`` (default): weighted if ``weight_specs`` was given,
+            otherwise unweighted. ``False``: always the unweighted estimate
+            ``Y / N``. ``True``: the weighted estimate ``Y_w / W``, i.e.
+            ``sum_i w_i y_id / sum_i w_i`` per cell; requires ``weight_specs``.
+
         Returns
         -------
         Dict[str, ContactSummary]
@@ -575,9 +697,15 @@ class SocialMix(DeterministicContactModel):
             - "All->All" for unstratified data
             - "M->All", "F->All" for participant-only stratification
             - "M->M", "M->F", "F->M", "F->F" for full stratification
+
+        Raises
+        ------
+        ValueError
+            If ``weighted=True`` but the fit has no ``weight_specs``.
         """
-        if self._cint is None:
-            # Get stratum labels
+        weighted = self._resolve_weighted(weighted)
+        if weighted not in self._cint:
+            Y, N = (self.Y_w, self.W) if weighted else (self.Y, self.N)
             labels = self._create_stratum_labels()
 
             # Compute raw intensity matrices based on data structure
@@ -585,43 +713,30 @@ class SocialMix(DeterministicContactModel):
 
             if self.K_part == 1 and self.K_cnt == 1:
                 # Single stratum: Y is (C, D), N is (C,)
-                raw["All->All"] = self.Y / self.N[:, np.newaxis]
+                raw["All->All"] = Y / N[:, np.newaxis]
 
             elif self.K_part > 1 and self.K_cnt == 1:
                 # Partial stratification: Y is (K_part, C, D), N is (K_part, C)
                 for k in range(self.K_part):
-                    raw[labels[k]] = self.Y[k] / self.N[k, :, np.newaxis]
+                    raw[labels[k]] = Y[k] / N[k, :, np.newaxis]
 
             else:
                 # Full/mixed stratification: Y is (K_part, K_cnt, C, D), N is (K_part, C)
                 idx = 0
                 for k_part in range(self.K_part):
                     for k_cnt in range(self.K_cnt):
-                        raw[labels[idx]] = (
-                            self.Y[k_part, k_cnt] / self.N[k_part, :, np.newaxis]
-                        )
+                        raw[labels[idx]] = Y[k_part, k_cnt] / N[k_part, :, np.newaxis]
                         idx += 1
 
             # Apply reciprocity adjustment if requested
             if self.apply_reciprocity and self.P is not None:
                 raw = apply_reciprocity(raw, self.strat_mode, self.K_cnt, self.P)
 
-            _nan = np.full(next(iter(raw.values())).shape, np.nan)
-            self._cint = {
-                key: ContactSummary(
-                    lower=_nan.copy(),
-                    central=arr,
-                    upper=_nan.copy(),
-                    alpha=np.nan,
-                    measure="mean",
-                    age_group_specs=self.age_group_specs,
-                )
-                for key, arr in raw.items()
-            }
+            self._cint[weighted] = self._to_summaries(raw)
 
-        return self._cint
+        return self._cint[weighted]
 
-    def rate(self) -> Dict[str, "ContactSummary"]:
+    def rate(self, weighted: Optional[bool] = None) -> Dict[str, "ContactSummary"]:
         """
         Compute contact rate matrix.
 
@@ -632,6 +747,11 @@ class SocialMix(DeterministicContactModel):
         by the population size of the target age group:
             ω[c,d] = M[c,d] / P[d]
 
+        Parameters
+        ----------
+        weighted : bool, optional
+            As in :meth:`cint`; passed through to it.
+
         Returns
         -------
         Dict[str, ContactSummary]
@@ -641,9 +761,11 @@ class SocialMix(DeterministicContactModel):
         Raises
         ------
         ValueError
-            If population data was not provided during initialization.
+            If population data was not provided during initialization, or if
+            ``weighted=True`` but the fit has no ``weight_specs``.
         """
-        if self._rate is None:
+        weighted = self._resolve_weighted(weighted)
+        if weighted not in self._rate:
             # Check that population data is available
             if self.P is None:
                 raise ValueError(
@@ -652,7 +774,7 @@ class SocialMix(DeterministicContactModel):
                 )
 
             # Get contact intensity matrices (central values)
-            cint_dict = self.cint()
+            cint_dict = self.cint(weighted=weighted)
 
             # Compute rate for each stratum: rate = cint / P
             raw = {}
@@ -666,20 +788,24 @@ class SocialMix(DeterministicContactModel):
                     k_cnt = stratum_idx % self.K_cnt
                     raw[key] = M / self.P[k_cnt, :][np.newaxis, :]
 
-            _nan = np.full(next(iter(raw.values())).shape, np.nan)
-            self._rate = {
-                key: ContactSummary(
-                    lower=_nan.copy(),
-                    central=arr,
-                    upper=_nan.copy(),
-                    alpha=np.nan,
-                    measure="mean",
-                    age_group_specs=self.age_group_specs,
-                )
-                for key, arr in raw.items()
-            }
+            self._rate[weighted] = self._to_summaries(raw)
 
-        return self._rate
+        return self._rate[weighted]
+
+    def _to_summaries(self, raw: Dict[str, NDArray]) -> Dict[str, "ContactSummary"]:
+        """Wrap point estimates in ContactSummary objects (no intervals)."""
+        _nan = np.full(next(iter(raw.values())).shape, np.nan)
+        return {
+            key: ContactSummary(
+                lower=_nan.copy(),
+                central=arr,
+                upper=_nan.copy(),
+                alpha=np.nan,
+                measure="mean",
+                age_group_specs=self.age_group_specs,
+            )
+            for key, arr in raw.items()
+        }
 
     def run_inference_bootstrap(
         self,
@@ -687,15 +813,30 @@ class SocialMix(DeterministicContactModel):
         random_state: Optional[int] = None,
         progress: bool = True,
         min_success_rate: float = 0.5,
+        weighted: Optional[bool] = None,
     ) -> BootstrapResults:
         """
         Estimate uncertainty via bootstrap resampling.
 
-        Runs bootstrap stability validation before resampling — age groups that are
-        too small for reliable resampling are merged automatically when
-        ``adaptive_merge=True``, or a ``ValueError`` is raised otherwise. If merging
-        occurs at this stage, cached point estimates (``cint``, ``rate``) are
-        invalidated and recomputed at the merged resolution.
+        Before resampling, the participant age groups are checked in two
+        stages. Either stage may merge age groups:
+
+        1. **Empty age groups.** If an age group has no participants in some
+           participant stratum, it is merged with a neighbour when
+           ``adaptive_merge=True``. Otherwise a ``ValueError`` is raised.
+        2. **Small age groups.** Let ``n_{s,c}`` be the number of participants
+           in stratum ``s`` and age group ``c`` (without stratification, the
+           number in age group ``c``). A resample leaves cell ``(s, c)`` empty
+           with probability about ``exp(-n_{s,c})``. While
+           ``sum over (s, c) of exp(-n_{s,c})`` is at least ``5e-5``, the age
+           group with the smallest count (its minimum over strata) is merged
+           with the smaller of its neighbours. This stage runs **whatever
+           the value of** ``adaptive_merge``.
+
+        A merge persists after the bootstrap. It changes ``age_group_specs``,
+        the cached point estimates (``cint``, ``rate``) are recomputed at the
+        merged resolution, and for a weighted fit the weights are recomputed
+        on the merged cells (see ``weighted``).
 
         Parameters
         ----------
@@ -708,6 +849,14 @@ class SocialMix(DeterministicContactModel):
         min_success_rate : float, default 0.5
             Minimum fraction of iterations that must succeed. Raises ``ValueError``
             if the actual success rate falls below this threshold.
+        weighted : bool, optional
+            As in :meth:`cint`: ``None`` (default) means weighted if
+            ``weight_specs`` was given. A weighted bootstrap rebuilds the
+            weights on every resample (counts such as the number of weekday
+            participants change between resamples). If the
+            bootstrap merges age groups, the weights are rebound to the new
+            cells and a :class:`~cntmosaic.weights.WeightWarning` says that
+            ``sm.weights`` has changed.
 
         Returns
         -------
@@ -723,8 +872,9 @@ class SocialMix(DeterministicContactModel):
         Raises
         ------
         ValueError
-            If empty age groups remain after adaptive merging, or if
-            ``success_rate < min_success_rate``.
+            If an age group is empty in some participant stratum and
+            ``adaptive_merge=False``, if ``success_rate < min_success_rate``,
+            or if ``weighted=True`` but the fit has no ``weight_specs``.
 
         Examples
         --------
@@ -733,6 +883,8 @@ class SocialMix(DeterministicContactModel):
         >>> cint_mean = boot.mean(statistic='cint')
         >>> cint_ci = boot.quantiles(q=[0.025, 0.975], statistic='cint')
         """
+        weighted = self._resolve_weighted(weighted)
+
         # Run bootstrap stability validation lazily.
         # This may adaptively merge more age groups than estimation required.
         boot_validator = SocialMixValidator(
@@ -758,13 +910,22 @@ class SocialMix(DeterministicContactModel):
             self._cells = dataclasses.replace(
                 validated["cells"], n_dropped=self._cells.n_dropped
             )
-            self._cint = None
-            self._rate = None
+            self._cint = {}
+            self._rate = {}
             # Drop stale age_grp column so _assign_age_groups_to_population()
             # recomputes it with the new (post-merge) intervals.
             if self.pop_data is not None and "age_grp" in self.pop_data.data.columns:
                 self.pop_data.data.drop(columns=["age_grp"], inplace=True)
             self._load()
+            # Rebind the weights to the merged cells (D25); bind-time warnings
+            # were already emitted at fit time.
+            self._fit_weights(warn_user=False)
+            if self.weight_specs is not None:
+                warn_weights(
+                    "The bootstrap merged participant age groups, so the weights were "
+                    "recomputed on the merged cells: sm.weights and the weighted point "
+                    "estimates have changed."
+                )
 
         # Create bootstrap estimator and run
         bootstrap = SocialMixBootstrap(
@@ -775,6 +936,7 @@ class SocialMix(DeterministicContactModel):
             apply_reciprocity=self.apply_reciprocity,
             n_boot=n_boot,
             random_state=random_state,
+            bound_weights=self._bound if weighted else None,
         )
 
         self._boot = bootstrap.run(

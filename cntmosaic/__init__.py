@@ -5,7 +5,7 @@ try:
 except PackageNotFoundError:
     __version__ = "unknown"
 
-from . import dataloader, datasets, models, preprocess, sim, vis
+from . import dataloader, datasets, models, preprocess, sim, vis, weights
 from .dataloader import ContactSurveyLoader
 from ._types import StratMode
 
@@ -20,4 +20,5 @@ __all__ = [
     "preprocess",
     "sim",
     "vis",
+    "weights",
 ]

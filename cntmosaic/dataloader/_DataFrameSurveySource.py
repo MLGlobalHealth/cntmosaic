@@ -45,9 +45,6 @@ class DataFrameSurveySource:
     ----------
     data : pd.DataFrame
         Merged participant-contact DataFrame with categorical dtypes restored.
-        When ``part_data.weight_col`` is set, survey weights are normalized
-        within each (age, stratum) cell before the merge so that
-        ``sum(w_i in cell) == N_cell``, preserving ``M = Y / N``.
     pop_data : pd.DataFrame
         Population DataFrame (from the validated ``PopulationData`` container).
     col_map : ColumnSpec
@@ -79,13 +76,6 @@ class DataFrameSurveySource:
         self.col_map: ColumnSpec = ColumnSpec.from_containers(
             self.part_data, self.cnt_data, self.pop_data_container
         )
-
-        # Normalize survey weights at the participant-cell level before merge so
-        # that sum(w_i in cell) == N_cell, preserving M = Y/N after weighting.
-        if self.part_data.weight_col is not None:
-            grp_cols = self.col_map.strat_vars_n
-            if not self.part_data.check_weights_normalized(grp_cols):
-                self.part_data.normalize_weights(grp_cols)
 
         self.data: pd.DataFrame = self._merge_data()
         self.pop_data: pd.DataFrame = self.pop_data_container.data
