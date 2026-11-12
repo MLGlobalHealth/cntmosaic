@@ -27,7 +27,7 @@ from ...utils._age_bin_processor import AgeBinProcessor
 from ...utils._participant_cells import bin_ages, copy_container
 from ._socialmix_bootstrap import BootstrapResults, SocialMixBootstrap
 from ._socialmix_helpers import apply_reciprocity, create_stratum_labels, infer_strat_mode
-from ._socialmix_utils import SocialMixDataLoader
+from ._socialmix_utils import PropMixFactorisation, SocialMixDataLoader, prop_mix_factorise
 from ._socialmix_validation import SocialMixValidator
 from ...weights import BindContext, WeightResult, WeightSpecs
 from ...weights._warnings import warn as warn_weights
@@ -116,6 +116,8 @@ class SocialMix(DeterministicContactModel):
         Compute the contact intensity matrix M[c,d].
     rate(weighted=None)
         Compute the contact rate matrix ω[c,d] = M[c,d] / P[d].
+    prop_mix_factorisation(weighted=None)
+        Proportionate-mixing factorisation of the contact intensity matrix.
     run_inference_bootstrap(n_boot, random_state, progress, min_success_rate)
         Quantify uncertainty via bootstrap resampling.
     predict()
@@ -791,6 +793,103 @@ class SocialMix(DeterministicContactModel):
             self._rate[weighted] = self._to_summaries(raw)
 
         return self._rate[weighted]
+
+    def prop_mix_factorisation(
+        self, weighted: Optional[bool] = None
+    ) -> PropMixFactorisation:
+        """Proportionate-mixing factorisation of the contact intensity matrix.
+
+        Factorises the fitted contact intensity matrix ``m`` as in socialmixr's
+        ``split_matrix()``::
+
+            m[i, j] = c * q * d[i] * a[i, j] * p[j]
+
+        where ``p[j]`` is the population share of age group ``j``,
+        ``c * q * d[i]`` is the mean number of contacts of a member of group
+        ``i``, ``c`` is the population-weighted mean number of contacts and
+        ``c * q`` is the largest eigenvalue of ``m``. The assortativity matrix
+        ``a`` compares group ``i``'s mixing with mixing **in proportion to
+        population size**::
+
+            a[i, j] = (share of group i's contacts that are with group j)
+                      / (share of the population in group j)
+
+        so ``a[i, j] = 1`` everywhere means group ``i`` spreads its contacts in
+        proportion to group sizes, and ``a[i, i] > 1`` means group ``i`` mixes
+        more with its own age group than that (assortative mixing). The
+        baseline is the population share, not activity-weighted proportionate
+        mixing, so differences in activity between groups also show in ``a``.
+
+        Parameters
+        ----------
+        weighted : bool, optional
+            Which matrix to factorise, as in :meth:`cint`. ``None`` (default):
+            the weighted estimate if ``weight_specs`` was given, otherwise the
+            unweighted one. Reciprocity is included if the fit used
+            ``apply_reciprocity=True``.
+
+        Returns
+        -------
+        PropMixFactorisation
+
+        Raises
+        ------
+        ValueError
+            If the fit has no population data (``pop_data``), or if
+            ``weighted=True`` without ``weight_specs``.
+        NotImplementedError
+            For stratified fits: the factorisation is defined for age-only
+            matrices.
+
+        Warns
+        -----
+        UserWarning
+            If an age group reports no contacts; its row of ``assortativity``
+            is NaN.
+
+        Notes
+        -----
+        Point estimate only: the factorisation is not computed for bootstrap
+        replicates.
+
+        Mapping to socialmixr's ``split_matrix()``:
+
+        =====================  =====================  ================
+        socialmixr             cntmosaic              symbol
+        =====================  =====================  ================
+        ``$matrix``            ``assortativity``      ``a[i, j]``
+        ``$mean.contacts``     ``mean_contacts``      ``c``
+        ``$normalisation``     ``normalisation``      ``q``
+        ``$contacts``          ``relative_contacts``  ``d[i]``
+        (not returned)         ``contacts``           ``c * q * d[i]``
+        (not returned)         ``spectral_radius``    ``c * q``
+        (population)           ``population_share``   ``p[j]``
+        =====================  =====================  ================
+
+        Examples
+        --------
+        >>> sm = SocialMix(part_data, cnt_data, age_group_specs, pop_data)
+        >>> fac = sm.prop_mix_factorisation()
+        >>> fac.assortativity          # diagonal > 1: assortative by age
+        >>> fac.spectral_radius        # equals R0 if every contact transmits
+        >>> np.allclose(fac.reconstruct(), fac.matrix)
+        True
+        """
+        weighted = self._resolve_weighted(weighted)
+        if self.P is None:
+            raise ValueError(
+                "prop_mix_factorisation needs population sizes; pass pop_data to "
+                "SocialMix."
+            )
+        if self.strat_mode != "single":
+            raise NotImplementedError(
+                "prop_mix_factorisation is defined for age-only matrices; this fit is "
+                f"stratified (participant strata {self.strat_vars_part}, contact "
+                f"strata {self.strat_vars_cnt})."
+            )
+        matrix = self.cint(weighted=weighted)["All->All"].central
+        assert matrix.shape == (self.C, self.C) == (self.C, len(self.P))
+        return prop_mix_factorise(matrix, self.P, self.age_group_specs, weighted=weighted)
 
     def _to_summaries(self, raw: Dict[str, NDArray]) -> Dict[str, "ContactSummary"]:
         """Wrap point estimates in ContactSummary objects (no intervals)."""

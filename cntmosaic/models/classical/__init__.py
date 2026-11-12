@@ -20,6 +20,8 @@ SocialMixBootstrap
     Bootstrap uncertainty quantification for SocialMix.
 BootstrapResults
     Container for bootstrap estimation results.
+PropMixFactorisation
+    Result of :meth:`SocialMix.prop_mix_factorisation`.
 Prem
     Bayesian contact matrix estimator (Prem et al. 2017).
 Prem2
@@ -31,6 +33,7 @@ from ._Prem import Prem
 from ._Prem2 import Prem2
 from ._SocialMix import SocialMix
 from ._socialmix_bootstrap import BootstrapResults, SocialMixBootstrap
+from ._socialmix_utils import PropMixFactorisation
 
 __all__ = [
     "DeterministicContactModel",
@@ -39,4 +42,5 @@ __all__ = [
     "SocialMix",
     "SocialMixBootstrap",
     "BootstrapResults",
+    "PropMixFactorisation",
 ]

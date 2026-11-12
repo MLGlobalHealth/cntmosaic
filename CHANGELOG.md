@@ -4,6 +4,7 @@
 
 ### Added
 
+- **`SocialMix.prop_mix_factorisation()`**: the proportionate-mixing factorisation of socialmixr's `split_matrix()`, $m_{ij} = c\,q\,d_i\,a_{ij}\,p_j$. It returns a `PropMixFactorisation` with the assortativity matrix (contacts relative to mixing in proportion to population size), contacts per person, population shares, the mean number of contacts, the spectral radius and the normalisation. Point estimate only; needs `pop_data`; age-only fits.
 - **Participant survey weights for `SocialMix`** (new subpackage `cntmosaic.weights`).
   - Weighting is opt-in: pass `weight_specs=WeightSpecs(...)` to `SocialMix` (or to `SocialMix.from_dataframes`).
   - `cint()` and `rate()` then return the weighted estimate by default; `cint(weighted=False)` still gives the unweighted one.

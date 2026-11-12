@@ -1,9 +1,13 @@
 """
 Data Loading Utilities for SocialMix
 
-This module provides helper classes for loading and processing stratified contact data.
+This module provides helper classes for loading and processing stratified contact data,
+and the proportionate-mixing factorisation of a contact matrix
+(:class:`PropMixFactorisation`, :func:`prop_mix_factorise`).
 """
 
+import warnings
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -503,3 +507,151 @@ class SocialMixDataLoader:
             ravel_stratum_codes([df[c].to_numpy() for c in code_cols], dims),
             index=df.index,
         )
+
+
+# ============================================================================
+# Proportionate-mixing factorisation
+# ============================================================================
+
+
+@dataclass(frozen=True, eq=False)
+class PropMixFactorisation:
+    """Proportionate-mixing factorisation of a contact intensity matrix,
+    ``m[i, j] = c * q * d[i] * a[i, j] * p[j]``.
+
+    Returned by :meth:`SocialMix.prop_mix_factorisation`; see there for the
+    definitions and the mapping to socialmixr's ``split_matrix()``.
+
+    Attributes
+    ----------
+    matrix : np.ndarray, shape (C, C)
+        The factorised contact intensity matrix ``m``.
+    assortativity : np.ndarray, shape (C, C)
+        ``a[i, j] = m[i, j] / (contacts[i] * population_share[j])``. Each row
+        satisfies ``sum_j a[i, j] * population_share[j] = 1``.
+    contacts : np.ndarray, shape (C,)
+        Mean number of contacts of a member of each age group (row sums of ``m``).
+    population_share : np.ndarray, shape (C,)
+        Share of the population in each age group, ``p[j]``.
+    mean_contacts : float
+        Population-weighted mean number of contacts, ``c``.
+    spectral_radius : float
+        Largest eigenvalue of ``m``, ``c * q``.
+    normalisation : float
+        ``q = spectral_radius / mean_contacts``.
+    age_group_specs : AgeGroupSpecs
+        Age groups of the rows and columns.
+    weighted : bool
+        Whether the factorised matrix is the weighted estimate.
+    """
+
+    matrix: NDArray
+    assortativity: NDArray
+    contacts: NDArray
+    population_share: NDArray
+    mean_contacts: float
+    spectral_radius: float
+    normalisation: float
+    age_group_specs: AgeGroupSpecs
+    weighted: bool
+
+    @property
+    def relative_contacts(self) -> NDArray:
+        """``d[i] = contacts[i] / spectral_radius`` (socialmixr's ``$contacts``)."""
+        return self.contacts / self.spectral_radius
+
+    def reconstruct(self) -> NDArray:
+        """``c * q * d[i] * a[i, j] * p[j]``; equals ``matrix`` up to rounding."""
+        return (
+            self.mean_contacts
+            * self.normalisation
+            * self.relative_contacts[:, np.newaxis]
+            * self.assortativity
+            * self.population_share[np.newaxis, :]
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"PropMixFactorisation({len(self.contacts)} age groups, "
+            f"mean_contacts={self.mean_contacts:.3g}, "
+            f"spectral_radius={self.spectral_radius:.3g}, "
+            f"normalisation={self.normalisation:.3g}, weighted={self.weighted})"
+        )
+
+
+def prop_mix_factorise(
+    matrix: NDArray,
+    population: NDArray,
+    age_group_specs: AgeGroupSpecs,
+    weighted: bool = False,
+) -> PropMixFactorisation:
+    """Proportionate-mixing factorisation of a square contact intensity matrix.
+
+    Computes ``m[i, j] = c * q * d[i] * a[i, j] * p[j]`` as socialmixr's
+    ``split_mean_norm_contacts()``: ``r = m.sum(1)``, ``p = P / P.sum()``,
+    ``c = sum(P * r) / sum(P)``, ``rho`` the largest eigenvalue of ``m``,
+    ``q = rho / c`` and ``a[i, j] = m[i, j] / (r[i] * p[j])``.
+
+    Parameters
+    ----------
+    matrix : np.ndarray, shape (C, C)
+        Contact intensity matrix (rows: participant age groups; columns:
+        contact age groups; the same age groups on both sides).
+    population : np.ndarray, shape (C,)
+        Population size of each age group.
+    age_group_specs : AgeGroupSpecs
+        Age groups of the rows and columns.
+    weighted : bool, default False
+        Recorded on the result.
+
+    Returns
+    -------
+    PropMixFactorisation
+
+    Warns
+    -----
+    UserWarning
+        If an age group has no contacts; its row of ``assortativity`` is NaN.
+    """
+    m = np.asarray(matrix, dtype=np.float64)
+    P = np.asarray(population, dtype=np.float64)
+    if m.ndim != 2 or m.shape[0] != m.shape[1] or P.shape != (m.shape[0],):
+        raise ValueError(
+            f"prop_mix_factorise needs a square matrix and one population size per "
+            f"age group; got matrix {m.shape} and population {P.shape}."
+        )
+
+    r = m.sum(axis=1)
+    p = P / P.sum()
+    c = float(np.sum(P * r) / P.sum())
+    eigenvalues = np.linalg.eigvals(np.nan_to_num(m))
+    rho = float(np.real(eigenvalues[np.argmax(np.abs(eigenvalues))]))
+
+    no_contacts = r == 0
+    if no_contacts.any():
+        groups = [
+            f"[{lo}, {hi + 1})"
+            for lo, hi, z in zip(age_group_specs.left, age_group_specs.right, no_contacts)
+            if z
+        ]
+        warnings.warn(
+            f"Age group(s) {groups} report no contacts; their rows of the "
+            f"assortativity matrix are undefined (NaN).",
+            UserWarning,
+            stacklevel=2,
+        )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        a = m / (r[:, np.newaxis] * p[np.newaxis, :])
+    a[no_contacts, :] = np.nan
+
+    return PropMixFactorisation(
+        matrix=m,
+        assortativity=a,
+        contacts=r,
+        population_share=p,
+        mean_contacts=c,
+        spectral_radius=rho,
+        normalisation=rho / c,
+        age_group_specs=age_group_specs,
+        weighted=bool(weighted),
+    )

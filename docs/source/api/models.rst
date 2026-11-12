@@ -105,6 +105,12 @@ SocialMix
     :inherited-members:
     :special-members: __init__
 
+PropMixFactorisation
+^^^^^^^^^^^^^^^^^^^^
+
+.. autoclass:: cntmosaic.models.PropMixFactorisation
+    :members:
+
 SocialMixBootstrap
 ^^^^^^^^^^^^^^^^^^
 

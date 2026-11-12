@@ -32,7 +32,7 @@ def __getattr__(name: str):
 #   from cntmosaic.models import SocialMix
 # continues to work without modification.
 # ---------------------------------------------------------------------------
-from .classical import BootstrapResults, SocialMix, SocialMixBootstrap
+from .classical import BootstrapResults, PropMixFactorisation, SocialMix, SocialMixBootstrap
 
 __all__ = [
     # Abstract base
@@ -53,6 +53,7 @@ __all__ = [
     "SocialMix",
     "SocialMixBootstrap",
     "BootstrapResults",
+    "PropMixFactorisation",
     # Utilities
     "to_inference_data",
 ]
