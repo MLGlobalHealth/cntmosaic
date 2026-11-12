@@ -1,6 +1,6 @@
 # Contributing to cntmosaic
 
-Thank you for your interest in `cntmosaic`. This is a preliminary (v0.5) release shared with
+Thank you for your interest in `cntmosaic`. This is a preliminary (v0.6) release shared with
 collaborators and early users. Contributions in the form of bug reports and feature requests
 are very welcome.
 

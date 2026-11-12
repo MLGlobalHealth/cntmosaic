@@ -15,7 +15,7 @@ probabilistic programming language [Numpyro](https://num.pyro.ai/en/stable/index
 which enables both Hamiltonian Monte Carlo (HMC) based full Bayesian inference and fast
 stochastic variational inference (SVI).
 
-> **Note:** This is a preliminary v0.5 release intended for collaborators and early users.
+> **Note:** This is a preliminary v0.6 release intended for collaborators and early users.
 > The API may change before a stable 1.0 release.
 
 ---
@@ -79,6 +79,7 @@ All notebooks are located in the [`tutorials/`](tutorials/) directory.
 | [02 — SocialMix](tutorials/02_Tutorial_SocialMix.ipynb) | Estimate age-stratified social contact matrices from survey data using the SocialMix model with bootstrap inference. |
 | [03 — Context-Specific Contact Matrices](tutorials/03_Tutorial_Prem_Context.ipynb) | Estimate household, school, work, and other contact matrices for the United States from the Epistorm-Mix survey using the `Prem2` model. |
 | [04 — Feature Selection](tutorials/04_Tutorial_Feature_Selection.ipynb) | Select the most parsimonious set of demographic stratification variables for contact models using LOO-CV ELPD. |
+| [05 — Survey Weights in SocialMix](tutorials/05_Tutorial_SocialMix_Weights.ipynb) | Apply participant weights in `cntmosaic`: day-of-week weights, age post-stratification, design and category weights, truncation, diagnostics, preview, and the weighted bootstrap. |
 
 ---
 

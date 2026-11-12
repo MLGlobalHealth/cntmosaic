@@ -18,6 +18,7 @@ in the Contact Mosaic package.
    priors
    distributions
    dataloader
+   weights
 
 .. toctree::
    :maxdepth: 2
