@@ -7,8 +7,8 @@ import numpy as np
 import numpyro
 from numpyro import distributions as dist
 
-from ..distributions._IGMRF2D import IGMRF2D
 from ..._utils import age_age_grid, diff_age_age_grid, symm_from_tril_ix_row
+from ..distributions._IGMRF2D import IGMRF2D
 from ._Spline2D import Spline2D
 
 
@@ -267,7 +267,10 @@ class PSpline2D(Spline2D):
         tau = numpyro.sample("spline_tau", dist.Gamma(self.tau_shape, self.tau_rate))
 
         beta = numpyro.sample(
-            "spline_coefs", IGMRF2D(num_nodes, self.order, cond_prec=tau)
+            "spline_coefs",
+            IGMRF2D(
+                num_nodes, self.order, cond_prec=tau, rescale_marginal_variance=True
+            ),
         )  # (M*M,)
 
         f = (self.PHI @ beta)[self.symm_tril_idx].reshape((self.A, self.A))
@@ -331,7 +334,9 @@ class PSpline2D(Spline2D):
 
         beta = numpyro.sample(
             "spline_coefs",
-            IGMRF2D(num_nodes, self.order, cond_prec=tau),
+            IGMRF2D(
+                num_nodes, self.order, cond_prec=tau, rescale_marginal_variance=True
+            ),
         )  # (event_dim_eff, M*M)
 
         beta = beta.swapaxes(0, 1)  # (M*M, event_dim_eff)
@@ -414,11 +419,21 @@ class PSpline2D(Spline2D):
 
         beta_diag = numpyro.sample(
             "spline_coefs_diag",
-            IGMRF2D(num_nodes, self.order, cond_prec=tau_diag),
+            IGMRF2D(
+                num_nodes,
+                self.order,
+                cond_prec=tau_diag,
+                rescale_marginal_variance=True,
+            ),
         )  # (event_dim_diag, M*M)
         beta_non_diag = numpyro.sample(
             "spline_coefs_non_diag",
-            IGMRF2D(num_nodes, self.order, cond_prec=tau_non_diag),
+            IGMRF2D(
+                num_nodes,
+                self.order,
+                cond_prec=tau_non_diag,
+                rescale_marginal_variance=True,
+            ),
         )  # (event_dim_non_diag, M*M)
 
         beta_diag = beta_diag.swapaxes(0, 1)  # (M*M, event_dim_diag)

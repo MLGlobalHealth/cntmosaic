@@ -20,6 +20,11 @@ class PremDataLoader:
     (participant, contact-age-group[, stratum]) observation, together with
     integer index arrays that map each row into the right model dimensions.
 
+    The frame includes *structural zeros*: every participant contributes one
+    row per contact age group (and contact stratum), with ``y = 0`` where no
+    such contact was recorded.  A zero here means the participant did not meet
+    anyone in that contact age group, not that the contact went unreported.
+
     Parameters
     ----------
     prem : Prem
@@ -45,8 +50,8 @@ class PremDataLoader:
         - ``C``     — number of participant age groups
         - ``D``     — number of contact age groups
         """
-        df_cnt = self._build_contact_frame()
-        self._merge_participant_data(df_cnt)
+        df_cnt_full = self._build_full_contact_frame()
+        self._merge_participant_data(df_cnt_full)
         self._aggregate()
         self._encode_strata()
         self._extract_arrays()
@@ -55,19 +60,59 @@ class PremDataLoader:
     # Internal steps
     # ------------------------------------------------------------------
 
-    def _build_contact_frame(self) -> pd.DataFrame:
-        """Return the observed contact data with categorical dtypes set."""
+    def _build_full_contact_frame(self) -> pd.DataFrame:
+        """Build a complete (id × cnt_age_grp [× cnt_strat]) Cartesian frame.
+
+        Every (participant, contact-age-group, contact-stratum) combination is
+        represented even if no contact was recorded; missing counts are filled
+        with zero (structural zeros) so the model likelihood sees the full
+        observation grid.  A participant contributes a zero for a contact age
+        group because they did not meet anyone in it, not because they failed
+        to report the contact.
+        """
         prem = self.prem
         df_cnt = prem.cnt_data.data.copy()
 
         if not isinstance(df_cnt["cnt_age_grp"].dtype, pd.CategoricalDtype):
             df_cnt["cnt_age_grp"] = pd.Categorical(df_cnt["cnt_age_grp"], ordered=True)
+
+        # Build Cartesian dimension dict: id × age group [× contact strat vars]
+        coords: dict = {
+            "id": df_cnt["id"].unique(),
+            "cnt_age_grp": df_cnt["cnt_age_grp"].cat.categories,
+        }
         for var in prem.strat_vars_cnt:
             col = f"cnt_{var}"
-            if col in df_cnt.columns and not isinstance(df_cnt[col].dtype, pd.CategoricalDtype):
-                df_cnt[col] = pd.Categorical(df_cnt[col])
+            if col in df_cnt.columns:
+                if not isinstance(df_cnt[col].dtype, pd.CategoricalDtype):
+                    df_cnt[col] = pd.Categorical(df_cnt[col])
+                coords[col] = df_cnt[col].cat.categories
 
-        return df_cnt
+        index = pd.MultiIndex.from_product(
+            [list(v) for v in coords.values()], names=list(coords.keys())
+        )
+        df_full = pd.DataFrame(index.to_frame(index=False), columns=list(coords.keys()))
+
+        merge_keys = ["id", "cnt_age_grp"] + [f"cnt_{v}" for v in prem.strat_vars_cnt]
+        df_full = pd.merge(df_full, df_cnt, on=merge_keys, how="left")
+        df_full["y"] = df_full["y"].fillna(0).astype(int)
+
+        # Restore categorical dtypes lost during merge
+        df_full["cnt_age_grp"] = pd.Categorical(
+            df_full["cnt_age_grp"],
+            categories=df_cnt["cnt_age_grp"].cat.categories,
+            ordered=True,
+        )
+        for var in prem.strat_vars_cnt:
+            col = f"cnt_{var}"
+            if col in df_cnt.columns:
+                df_full[col] = pd.Categorical(
+                    df_full[col],
+                    categories=df_cnt[col].cat.categories,
+                    ordered=getattr(df_cnt[col].cat, "ordered", False),
+                )
+
+        return df_full
 
     def _merge_participant_data(self, df_cnt_full: pd.DataFrame) -> None:
         """Left-join the contact frame with participant data on participant ID."""
@@ -90,7 +135,13 @@ class PremDataLoader:
             )
 
     def _aggregate(self) -> None:
-        """Sum contact counts within each (participant × part_age_grp × cnt_age_grp [× strat]) cell."""
+        """Sum contact counts within each (participant × part_age_grp × cnt_age_grp [× strat]) cell.
+
+        ``observed=True`` so only cells materialised by the Cartesian contact
+        frame are kept.  ``part_age_grp`` and the ``part_*`` strata are 1:1 with
+        the participant ``id``; expanding them (``observed=False``) would emit
+        spurious zero rows at the wrong participant age group.
+        """
         prem = self.prem
         groupby_cols = ["id", "part_age_grp", "cnt_age_grp"]
         for col in [f"part_{v}" for v in prem.strat_vars_part] + [

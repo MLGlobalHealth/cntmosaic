@@ -106,7 +106,7 @@ class IGMRF2D(Distribution):
         num_nodes: tuple[int, int],
         order: int,
         loc: ArrayLike = 0.0,
-        cond_prec: float = 1.0,
+        cond_prec: ArrayLike = 1.0,
         tol: float = 1e-10,
         rescale_marginal_variance: bool = False,
         *,
@@ -247,7 +247,7 @@ class IGMRF2D(Distribution):
         )
 
     def sample(
-        self, key: jax.dtypes.prng_key, sample_shape: tuple[int, ...] = ()
+        self, key: jax.Array, sample_shape: tuple[int, ...] = ()
     ) -> jax.Array:
         """
         Sample from the IGMRF2D distribution.
@@ -262,7 +262,7 @@ class IGMRF2D(Distribution):
 
         Parameters
         ----------
-        key : jax.dtypes.prng_key
+        key : jax.Array
             PRNG key for random number generation.
         sample_shape : tuple[int, ...], optional
             Shape of the sample batch to generate. Default is ().

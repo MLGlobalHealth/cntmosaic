@@ -1,10 +1,11 @@
+import jax
 import jax.numpy as jnp
 import numpyro
 from jax.typing import ArrayLike
 from numpyro import distributions as dist
 
-from ..distributions import IGMRF2D, SymIGMRF2D
 from ....utils import symm_from_tril_ix_col
+from ..distributions import IGMRF2D, SymIGMRF2D
 from ._Prior2D import Prior2D
 
 
@@ -234,7 +235,7 @@ class vdKassteele2D(Prior2D):
         """
         self.symm_tril_ix = symm_from_tril_ix_col(self.A)
 
-    def sample_single(self) -> ArrayLike:
+    def sample_single(self) -> jax.Array:
         """
         Sample symmetric contact matrix using IGMRF prior.
 
@@ -274,15 +275,20 @@ class vdKassteele2D(Prior2D):
         SymIGMRF2D : Symmetric 2D IGMRF distribution
         sample_partial : Asymmetric variant
         """
-        tau = numpyro.sample("tau", dist.Gamma(self.tau_shape, self.tau_rate))
-        f = numpyro.sample("f", SymIGMRF2D(self.A, order=2, cond_prec=tau))[
-            self.symm_tril_ix
-        ]
+        tau = jnp.asarray(
+            numpyro.sample("tau", dist.Gamma(self.tau_shape, self.tau_rate))
+        )
+        f = jnp.asarray(
+            numpyro.sample(
+                "f",
+                SymIGMRF2D(self.A, order=2, cond_prec=tau, rescale_marginal_variance=True),
+            )
+        )[self.symm_tril_ix]
         f = f.reshape((self.A, self.A))  # Column-major order to match SymIGMRF2D output
 
         return f
 
-    def sample_partial(self) -> ArrayLike:
+    def sample_partial(self) -> jax.Array:
         """
         Sample asymmetric contact matrix with dimension-specific precision.
 
@@ -328,17 +334,26 @@ class vdKassteele2D(Prior2D):
         sample_single : Symmetric variant
         sample_full : Separate diagonal/off-diagonal structure
         """
-        tau = numpyro.sample("tau", dist.Gamma(self.tau_shape, self.tau_rate))
-        f = numpyro.sample(
-            "f",
-            IGMRF2D((self.A, self.A), order=self.order, cond_prec=tau),
-            sample_shape=(self.event_dim,),
+        tau = jnp.asarray(
+            numpyro.sample("tau", dist.Gamma(self.tau_shape, self.tau_rate))
+        )
+        f = jnp.asarray(
+            numpyro.sample(
+                "f",
+                IGMRF2D(
+                    (self.A, self.A),
+                    order=self.order,
+                    cond_prec=tau,
+                    rescale_marginal_variance=True,
+                ),
+                sample_shape=(self.event_dim,),
+            )
         )  # IGMRF2D returns C-order (row-major) flattened arrays, so reshape with default C-order
         f = f.reshape((self.event_dim, self.A, self.A))
 
         return f
 
-    def sample_full(self) -> ArrayLike:
+    def sample_full(self) -> jax.Array:
         """
         Sample contact matrix with separate diagonal and off-diagonal priors.
 
@@ -393,28 +408,36 @@ class vdKassteele2D(Prior2D):
         SymIGMRF2D : Symmetric IGMRF for diagonal
         IGMRF : General IGMRF for off-diagonal
         """
-        tau = numpyro.sample("tau", dist.Gamma(self.tau_shape, self.tau_rate))
+        tau = jnp.asarray(
+            numpyro.sample("tau", dist.Gamma(self.tau_shape, self.tau_rate))
+        )
 
         # Sample diagonal elements (symmetric)
-        f_diag = numpyro.sample(
-            "f_diag",
-            SymIGMRF2D(self.A, order=self.order, cond_prec=tau),
-            sample_shape=(self.event_dim_diag,),
+        f_diag = jnp.asarray(
+            numpyro.sample(
+                "f_diag",
+                SymIGMRF2D(
+                    self.A, order=self.order, cond_prec=tau, rescale_marginal_variance=True
+                ),
+                sample_shape=(self.event_dim_diag,),
+            )
         )[..., self.symm_tril_ix].reshape((self.event_dim_diag, self.A, self.A))
 
         # Sample off-diagonal elements (asymmetric allowed)
-        f_non_diag = numpyro.sample(
-            "f_non_diag",
-            IGMRF2D((self.A, self.A), order=self.order, cond_prec=tau),
-            sample_shape=(self.event_dim_non_diag_eff,),
+        f_non_diag = jnp.asarray(
+            numpyro.sample(
+                "f_non_diag",
+                IGMRF2D((self.A, self.A), order=self.order, cond_prec=tau),
+                sample_shape=(self.event_dim_non_diag_eff,),
+            )
         ).reshape((self.event_dim_non_diag_eff, self.A, self.A))
 
         # Assemble diagonal and off-diagonal blocks using parent class method
-        f = self._assemble_full_prior_blocks(f_diag, f_non_diag)
+        f = jnp.asarray(self._assemble_full_prior_blocks(f_diag, f_non_diag))
 
         return f
 
-    def sample(self) -> ArrayLike:
+    def sample(self) -> jax.Array:
         """
         Sample contact matrix using IGMRF prior.
 
