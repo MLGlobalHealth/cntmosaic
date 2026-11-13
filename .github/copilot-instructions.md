@@ -82,9 +82,8 @@ pytest --cov=cntmosaic --cov-report=html
 - For JupyterHub: Use conda environment with custom kernel
 
 ### Jupyter Notebooks
-- Located in `tutorials/`
+- Located in `docs/source/tutorials/`; executed by myst-nb when the docs are built (see `docs/source/conf.py`)
 - **Critical**: Notebooks use `nbstripout` to prevent committing outputs (configured in `.gitattributes`)
-- Save figures for documentation using: `save_tutorial_figure(chart, "filename")` from `utils._tutorial_utils`
 
 ### Package Structure
 - Editable install: `pip install -e .`
@@ -170,4 +169,3 @@ contacts = contact_gen.generate(seed=42)
 - `dataloader/_dataloader.py`: Contains `CoordToColumns` docstring with full field explanations
 - `models/_numpyro.py`: Inference wrappers and ArviZ conversion
 - `distributions/_IGMRF2D.py`: Core spatial prior implementation
-- `tutorials/README.md`: Notebook workflow and figure saving conventions

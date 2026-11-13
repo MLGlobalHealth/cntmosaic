@@ -86,7 +86,7 @@ plan to contribute to ``cntmosaic``.
 
 .. code-block:: bash
 
-   git clone https://github.com/ShozenD/cntmosaic.git
+   git clone https://github.com/MLGlobalHealth/cntmosaic.git
    cd cntmosaic
    pip install -e ".[dev]"
 
@@ -181,7 +181,7 @@ must use MCMC, you can reduce JAX's memory pre-allocation:
 **Getting help**
 
 If you encounter an error not listed here, please open an issue on
-`GitHub <https://github.com/ShozenD/cntmosaic/issues>`_ and include the
+`GitHub <https://github.com/MLGlobalHealth/cntmosaic/issues>`_ and include the
 output of the following snippet so we can reproduce your environment:
 
 .. code-block:: python

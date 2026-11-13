@@ -27,6 +27,12 @@
 ### Changed (breaking)
 
 - **`SocialMix(apply_reciprocity=...)` now defaults to `False`** (also in `SocialMix.from_dataframes`). The reciprocity adjustment is a modelling choice and is not appropriate in every analysis, so it must be requested explicitly with `apply_reciprocity=True`. The summarisers already defaulted to `False`.
+- **`load_polymod_uk()` returns the data close to the source**, so that age grouping is done by the user.
+  - The precomputed `part_age_grp` and `cnt_age_grp` columns are removed.
+  - The gender columns are plain strings, not categorical.
+  - `population` has single-year ages, `age` (0 to 90, where 90 stands for 90+), with `gender` and `P`, instead of 5-year `age_grp` bands.
+  - The participants table now includes `dayofweek` and the further POLYMOD participant variables.
+  - Tutorial 01 shows the preprocessing.
 
 ### Removed (breaking)
 
@@ -46,6 +52,8 @@ from cntmosaic.weights import WeightSpecs, DesignWeights
 part = ParticipantData(df, id_col="id", age_col="age", aux_cols="w")
 sm = SocialMix(part, cnt, specs, pop, weight_specs=WeightSpecs(DesignWeights("w")))
 ```
+
+The tutorial figure helpers `save_tutorial_figure()`, `list_tutorial_figures()`, `convert_notebook_to_html()` and `FIGURE_DIR` have been removed from `cntmosaic.utils`. The tutorials are now part of the documentation (`docs/source/tutorials/`) and are executed when the documentation is built, so their figures no longer need to be saved separately. Importing `cntmosaic.utils` also no longer creates a `docs/tutorials/figures/` folder.
 
 ### Changed
 

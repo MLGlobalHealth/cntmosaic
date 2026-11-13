@@ -89,9 +89,9 @@ all = [
 
 [project.urls]
 Documentation = "https://cntmosaic-docs.readthedocs.io"
-Homepage = "https://github.com/ShozenD/cntmosaic"
-Issues = "https://github.com/ShozenD/cntmosaic/issues"
-Repository = "https://github.com/ShozenD/cntmosaic.git"
+Homepage = "https://github.com/MLGlobalHealth/cntmosaic"
+Issues = "https://github.com/MLGlobalHealth/cntmosaic/issues"
+Repository = "https://github.com/MLGlobalHealth/cntmosaic.git"
 
 [tool.pytest.ini_options]
 addopts = "-ra -q --strict-markers"
