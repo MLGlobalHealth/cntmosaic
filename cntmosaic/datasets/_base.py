@@ -56,15 +56,33 @@ def load_polymod_germany() -> SurveyData:
 
 
 def load_polymod_uk() -> SurveyData:
-    """Loads the UK Polymod dataset.
+    """Loads the UK POLYMOD dataset.
 
-    This function loads a cleaned version of the UK POLYMOD dataset.
+    The UK part of the POLYMOD contact survey (Mossong et al., 2008), with the
+    2011 UK census population. The tables are close to the source data: no
+    age groups are assigned and no columns are converted to categorical, so
+    that preprocessing is left to the user.
 
     Returns
     -------
     SurveyData
-            A typed dict with keys 'contacts', 'participants', 'population'
-            (each a pandas DataFrame).
+        A typed dict with three pandas DataFrames:
+
+        ``participants`` (966 rows, one per participant)
+            ``part_id``, ``hh_id``, ``part_age`` (years), ``part_gender``
+            (``"M"``/``"F"``), ``dayofweek`` (day of the diary, 0 = Sunday,
+            ..., 6 = Saturday; NaN if unknown) and further POLYMOD participant
+            variables (``part_occupation``, ``part_education``, ...).
+        ``contacts`` (11487 rows, one per reported contact)
+            ``part_id``, ``cont_id``, ``cnt_age_exact`` (years; NaN if only an
+            estimate was given), ``cnt_age_est_min``, ``cnt_age_est_max``,
+            ``cnt_gender`` (``"M"``/``"F"``), the setting indicators
+            ``cnt_home``, ``cnt_work``, ``cnt_school``, ``cnt_transport``,
+            ``cnt_leisure``, ``cnt_otherplace``, and ``frequency_multi``,
+            ``phys_contact`` (1 = yes, 2 = no), ``duration_multi``.
+        ``population`` (182 rows)
+            ``age`` (single year, 0 to 90; 90 stands for 90 and over),
+            ``gender`` (``"M"``/``"F"``), ``P`` (population size).
     """
 
     return load_pickle_data("polymod_uk.pkl")
