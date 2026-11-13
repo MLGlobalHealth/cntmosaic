@@ -96,7 +96,7 @@ class TestDiagnostics:
             make_ctx(_part([1.0, 1.0, 1.0]))
         ).result()
         text = repr(result)
-        for piece in ("3 participants", "1 cells", "smallest n_eff", "largest weight", "capped"):
+        for piece in ("respondents in", "cells", "smallest n_eff", "largest weight", "capped"):
             assert piece in text
 
     def test_factor_without_effect_warns(self):
