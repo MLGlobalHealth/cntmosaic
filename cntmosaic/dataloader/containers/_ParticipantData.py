@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-import numpy as np
 import pandas as pd
 
 from ._participant_preprocessing import preprocess_participant_data
@@ -47,7 +46,7 @@ class ParticipantData:
     strat_var_cols : Optional[Union[List[str], str]], default=None
         Stratification variable column name(s) for participants.
         Can be a single string or list of strings. Examples: 'gender', ['gender', 'region'].
-        Each variable is renamed with 'part_' prefix (e.g., 'gender' → 'part_gender').
+        Each variable is renamed with the ``part_`` prefix (e.g., ``gender`` → ``part_gender``).
     repeat_col : Optional[str], default=None
         Name of the column indicating repeat interviews/waves.
         Used to track longitudinal data where participants are surveyed multiple times.
@@ -55,14 +54,15 @@ class ParticipantData:
     amb_cnt_col : Optional[str], default=None
         Name of the column containing ambiguous/group contact counts.
         If None, no ambiguous contact column is added to the DataFrame.
-    weight_col : Optional[str], default=None
-        Name of the column containing individual-level survey weights.
-        Values must be strictly positive numeric. When provided, the column
-        is renamed to 'part_weight' internally. Weights are normalized within
-        each (age_group, stratum) cell by :meth:`normalize_weights` before use
-        in :class:`~cntmosaic.models.SocialMix`, so that
-        ``sum(w_i in cell c) == N_cell``, preserving the contact intensity
-        estimator ``M = Y / N``.
+    aux_cols : Optional[Union[List[str], str]], default=None
+        Auxiliary column name(s) kept for participant weighting (see
+        :mod:`cntmosaic.weights`), e.g. ``"dayofweek"`` or a design-weight
+        column. Each is renamed with the ``part_`` prefix (``"dayofweek"`` →
+        ``"part_dayofweek"``). Auxiliary columns are **not** stratification
+        variables, and they **keep their missing values**: rows are never
+        dropped because of them. They must not overlap any other declared
+        column or a reserved name (``id``, ``part_age``, ``part_age_grp``,
+        ``part_age_min``, ``part_age_max``, ``part_repeat``).
 
     Attributes
     ----------
@@ -82,16 +82,12 @@ class ParticipantData:
         Called automatically during initialization.
     get_strat_vars(prefix=False)
         Returns stratification variable names, optionally with '_part' suffix.
+    get_aux_cols(prefix=True)
+        Returns auxiliary column names, by default with the ``part_`` prefix.
     get_sample_sizes(stratify=False)
         Returns DataFrame with participant counts, optionally stratified by all variables.
     summary()
         Returns dictionary with summary statistics about the participant data.
-    check_weights_normalized(grp_cols, tol=1e-6)
-        Returns True if 'part_weight' sums to the participant count within each
-        cell defined by grp_cols. Always returns True when weight_col is None.
-    normalize_weights(grp_cols)
-        Rescales 'part_weight' in-place so that weights sum to the participant
-        count within each cell defined by grp_cols.
 
     Examples
     --------
@@ -154,10 +150,10 @@ class ParticipantData:
     3. Converts object-type columns (except ID) to categorical dtype
     4. Renames columns to standardized names:
        - id_col → 'id' (only if id_col != 'id')
-       - age_col → 'part_age' (only if not already starting with 'part_')
-       - age_grp_col → 'part_age_grp' (only if not already starting with 'part_')
+       - age_col → ``part_age`` (only if not already starting with ``part_``)
+       - age_grp_col → ``part_age_grp`` (only if not already starting with ``part_``)
        - Each strat_var_cols → '{var}_part' (only if not already ending with '_part')
-       - repeat_col → 'part_repeat' (only if not already starting with 'part_')
+       - repeat_col → ``part_repeat`` (only if not already starting with ``part_``)
     5. Validates all data constraints
 
     **Processed DataFrame Columns:**
@@ -168,7 +164,7 @@ class ParticipantData:
     - {var}_part: Each stratification variable with _part suffix
     - part_repeat: Repeat interview indicator (if specified)
     - {amb_cnt_col}: Ambiguous contact count column (only if specified)
-    - part_weight: Individual-level survey weight (if weight_col specified)
+    - ``part_{aux}``: Each auxiliary column (only if specified; may contain NaN)
 
     **Validation Checks:**
 
@@ -179,8 +175,9 @@ class ParticipantData:
     - Age groups (if using age_grp_col) must be categorical with IntervalIndex categories
     - Repeat values (if specified) must be non-negative numeric
     - Ambiguous contact counts (if specified) must be non-negative numeric
-    - Survey weights (if weight_col specified) must be strictly positive numeric
-    - No missing values in required columns (removed during preprocessing)
+    - No missing values in required columns (removed during preprocessing);
+      auxiliary columns may contain missing values
+    - Auxiliary columns must not overlap other declared columns or reserved names
 
     **Warnings:**
 
@@ -202,7 +199,7 @@ class ParticipantData:
     strat_var_cols: Optional[Union[List[str], str]] = None
     repeat_col: Optional[str] = None
     amb_cnt_col: Optional[str] = None
-    weight_col: Optional[str] = None
+    aux_cols: Optional[Union[List[str], str]] = None
 
     def __post_init__(self) -> None:
         """
@@ -234,6 +231,14 @@ class ParticipantData:
             object.__setattr__(self, "strat_var_cols", [self.strat_var_cols])
         elif self.strat_var_cols is None:
             object.__setattr__(self, "strat_var_cols", [])
+
+        # Normalize aux_cols to list format
+        if isinstance(self.aux_cols, str):
+            object.__setattr__(self, "aux_cols", [self.aux_cols])
+        elif self.aux_cols is None:
+            object.__setattr__(self, "aux_cols", [])
+        else:
+            object.__setattr__(self, "aux_cols", list(self.aux_cols))
 
         # Validate mutual exclusivity of age specifications.
         # Exactly one of the three forms must be used:
@@ -280,7 +285,7 @@ class ParticipantData:
                 self.strat_var_cols,
                 self.repeat_col,
                 self.amb_cnt_col,
-                self.weight_col,
+                self.aux_cols,
             ),
         )
 
@@ -323,7 +328,6 @@ class ParticipantData:
             self.age_grp_col,
             self.repeat_col,
             self.amb_cnt_col,
-            self.weight_col,
         )
 
     @property
@@ -396,12 +400,12 @@ class ParticipantData:
 
     def get_strat_vars(self, prefix: bool = False) -> List[str]:
         """
-        Return list of stratification variable names, optionally with 'part_' prefix.
+        Return list of stratification variable names, optionally with the ``part_`` prefix.
 
         Parameters
         ----------
         prefix : bool, default=False
-            If True, returns stratification variable names with 'part_' prefix.
+            If True, returns stratification variable names with the ``part_`` prefix.
             If False, returns original stratification variable names.
 
         Returns
@@ -425,6 +429,25 @@ class ParticipantData:
             ]
         else:
             return [var.removeprefix("part_") for var in self.strat_var_cols]
+
+    def get_aux_cols(self, prefix: bool = True) -> List[str]:
+        """
+        Return auxiliary column names.
+
+        Parameters
+        ----------
+        prefix : bool, default=True
+            If True, return the names as they appear in ``data`` (with the
+            ``part_`` prefix). If False, return the names without the prefix.
+
+        Examples
+        --------
+        >>> part_data = ParticipantData(df, 'id', age_col='age', aux_cols='dayofweek')
+        >>> part_data.get_aux_cols()
+        ['part_dayofweek']
+        """
+        names = [c if c.startswith("part_") else f"part_{c}" for c in self.aux_cols]
+        return names if prefix else [c.removeprefix("part_") for c in names]
 
     def get_strat_var_schema(self) -> Dict[str, Dict[str, List[str | int]]]:
         """
@@ -494,86 +517,6 @@ class ParticipantData:
             .agg(N=("id", "count"))
             .reset_index()
         )
-
-    def check_weights_normalized(
-        self, grp_cols: List[str], tol: float = 1e-6
-    ) -> bool:
-        """
-        Return True if survey weights are cell-normalized within grp_cols.
-
-        A weight vector is considered normalized when, within each cell defined
-        by grp_cols, the sum of weights equals the participant count for that
-        cell: ``sum(w_i in cell) == N_cell``.
-
-        Always returns True when weight_col is None (no weights to check).
-
-        Parameters
-        ----------
-        grp_cols : List[str]
-            Column names to group by when checking normalization (e.g.
-            ``["part_age_grp"]`` or ``["part_age_grp", "part_gender"]``).
-            These columns must already exist in ``self.data``.
-        tol : float, default=1e-6
-            Absolute tolerance passed to ``numpy.allclose``.
-
-        Returns
-        -------
-        bool
-            True if weights are normalized within every cell, False otherwise.
-
-        Examples
-        --------
-        >>> pd_ = ParticipantData(df, id_col='id', age_col='age', weight_col='w')
-        >>> pd_.check_weights_normalized(["part_age_grp"])
-        False
-        >>> pd_.normalize_weights(["part_age_grp"])
-        >>> pd_.check_weights_normalized(["part_age_grp"])
-        True
-        """
-        if self.weight_col is None:
-            return True
-        cell_sums = self.data.groupby(grp_cols, observed=False)["part_weight"].sum()
-        cell_counts = self.data.groupby(grp_cols, observed=False)["id"].count()
-        return bool(np.allclose(cell_sums.values, cell_counts.values, atol=tol))
-
-    def normalize_weights(self, grp_cols: List[str]) -> None:
-        """
-        Rescale 'part_weight' in-place so weights sum to N within each cell.
-
-        For each cell defined by grp_cols, applies the rescaling:
-
-        ``w_i_normalized = w_i * N_cell / sum(w_j for j in cell)``
-
-        This ensures ``sum(w_i_normalized in cell) == N_cell``, preserving the
-        contact intensity estimator ``M = Y / N`` when weights are used.
-
-        Parameters
-        ----------
-        grp_cols : List[str]
-            Column names that define normalization cells (e.g.
-            ``["part_age_grp"]`` or ``["part_age_grp", "part_gender"]``).
-            These columns must already exist in ``self.data``.
-
-        Raises
-        ------
-        ValueError
-            If weight_col is None (no weights are set).
-
-        Examples
-        --------
-        >>> pd_ = ParticipantData(df, id_col='id', age_col='age', weight_col='w')
-        >>> pd_.normalize_weights(["part_age_grp"])
-        >>> pd_.check_weights_normalized(["part_age_grp"])
-        True
-        """
-        if self.weight_col is None:
-            raise ValueError(
-                "Cannot normalize weights: no weight_col is set on this ParticipantData."
-            )
-        df = self.data
-        cell_sum = df.groupby(grp_cols, observed=False)["part_weight"].transform("sum")
-        cell_count = df.groupby(grp_cols, observed=False)["id"].transform("count")
-        df["part_weight"] = df["part_weight"] * cell_count / cell_sum
 
     def summary(self) -> Dict[str, Any]:
         """

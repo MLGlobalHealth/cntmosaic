@@ -8,7 +8,7 @@ body:
       value: |
         Thank you for reporting a bug. Please fill in as much detail as possible.
         Before submitting, check whether the issue has already been reported in the
-        [existing issues](https://github.com/ShozenD/cntmosaic/issues).
+        [existing issues](https://github.com/MLGlobalHealth/cntmosaic/issues).
 
   - type: textarea
     id: description

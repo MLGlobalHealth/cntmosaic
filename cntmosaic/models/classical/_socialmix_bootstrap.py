@@ -22,6 +22,9 @@ from ._socialmix_helpers import (
     create_stratum_labels,
     infer_strat_mode,
     participant_labels,
+    population_by_contact_stratum,
+    stratum_codes,
+    stratum_dims,
 )
 
 
@@ -40,19 +43,22 @@ class BootstrapResults:
         Number of bootstrap iterations performed
     success_rate : float
         Fraction of successful bootstrap iterations
+    weighted : bool
+        Whether participant weights were applied (rebuilt in every replicate)
     """
 
     cint_samples: List[Dict[str, NDArray]]
     rate_samples: List[Dict[str, NDArray]]
     n_boot: int
     success_rate: float
+    weighted: bool = False
 
     def __repr__(self) -> str:
         """Fast repr for debugger compatibility."""
         n_samples = len(self.cint_samples)
         strata_keys = list(self.cint_samples[0].keys()) if n_samples > 0 else []
         return (
-            f"BootstrapResults(n_boot={self.n_boot}, "
+            f"BootstrapResults(n_boot={self.n_boot}, weighted={self.weighted}, "
             f"success_rate={self.success_rate:.2%}, "
             f"samples={n_samples}, strata={strata_keys})"
         )
@@ -163,9 +169,10 @@ class SocialMixBootstrap:
         cnt_data: ContactData,
         age_group_specs: AgeGroupSpecs,
         pop_data: Optional[PopulationData] = None,
-        apply_reciprocity: bool = True,
+        apply_reciprocity: bool = False,
         n_boot: int = 1000,
         random_state: Optional[int] = None,
+        bound_weights=None,
     ):
         """
         Initialize bootstrap estimator.
@@ -180,12 +187,16 @@ class SocialMixBootstrap:
             Age stratification bins
         pop_data : PopulationData, optional
             Population data for reciprocity adjustment
-        apply_reciprocity : bool, default True
+        apply_reciprocity : bool, default False
             Whether to apply reciprocity adjustment within each bootstrap iteration
         n_boot : int, default 1000
             Number of bootstrap samples
         random_state : int, optional
             Random seed for reproducibility
+        bound_weights : _BoundWeightSpecs, optional
+            Participant weights bound to ``part_data`` (same participants, same
+            order). When given, the weights are rebuilt on every resample and
+            each replicate is the weighted ratio estimator.
         """
         self.part_data = part_data
         self.cnt_data = cnt_data
@@ -194,6 +205,7 @@ class SocialMixBootstrap:
         self.apply_reciprocity = apply_reciprocity
         self.n_boot = n_boot
         self.rng = np.random.default_rng(random_state)
+        self.bound_weights = bound_weights
 
         # Stratification info (will be set during preparation)
         self.C: int = 0  # Number of participant age groups
@@ -273,6 +285,14 @@ class SocialMixBootstrap:
             self._prepare_bootstrap_data()
         )
 
+        if self.bound_weights is not None:
+            ids = self.part_data.data["id"].to_numpy()
+            if not np.array_equal(np.asarray(self.bound_weights.ids), ids):
+                raise RuntimeError(
+                    "Internal error: the bound weights do not belong to the "
+                    "participants being resampled."
+                )
+
         # Storage for results
         cint_samples = []
         rate_samples = []
@@ -280,22 +300,24 @@ class SocialMixBootstrap:
         iterator = tqdm(range(self.n_boot), desc="Bootstrapping", disable=not progress)
 
         for b in iterator:
+            boot_idx = boot_indices[b]
+            # Weights are rebuilt on every resample, outside the try block: an
+            # error here is a bug, not a degenerate sample, and must propagate.
+            weights = (
+                None
+                if self.bound_weights is None
+                else self.bound_weights.weights(boot_idx)
+            )
             try:
-                boot_idx = boot_indices[b]
                 cint_boot, rate_boot = self._bootstrap_iteration(
-                    Y_raw, age_codes, part_strat_codes, boot_idx
+                    Y_raw, age_codes, part_strat_codes, boot_idx, weights
                 )
                 cint_samples.append(cint_boot)
                 rate_samples.append(rate_boot)
-            except (ValueError, ZeroDivisionError) as e:
+            except (ValueError, ZeroDivisionError, FloatingPointError) as e:
+                # Degenerate resamples only; other exceptions propagate.
                 if progress:
                     iterator.write(f"Bootstrap iteration {b} failed: {str(e)[:100]}")
-                continue
-            except Exception as e:
-                if progress:
-                    iterator.write(
-                        f"Bootstrap iteration {b} unexpected error: {str(e)[:100]}"
-                    )
                 continue
 
         n_successful = len(cint_samples)
@@ -319,6 +341,7 @@ class SocialMixBootstrap:
             rate_samples=rate_samples,
             n_boot=n_successful,
             success_rate=success_rate,
+            weighted=self.bound_weights is not None,
         )
 
     def _prepare_bootstrap_data(
@@ -349,22 +372,22 @@ class SocialMixBootstrap:
         self.C = len(self.part_data.data["part_age_grp"].cat.categories)
         self.D = len(self.cnt_data.data["cnt_age_grp"].cat.categories)
 
-        # Calculate K_part and K_cnt
-        if self.strat_vars_part:
-            self.K_part = 1
-            for var in self.strat_vars_part:
-                col_name = f"part_{var}"
-                self.K_part *= self.part_data.data[col_name].nunique()
-        else:
-            self.K_part = 1
-
-        if self.strat_vars_cnt:
-            self.K_cnt = 1
-            for var in self.strat_vars_cnt:
-                col_name = f"cnt_{var}"
-                self.K_cnt *= self.cnt_data.data[col_name].nunique()
-        else:
-            self.K_cnt = 1
+        # K_part and K_cnt = product of the number of categories (not nunique),
+        # matching the stratum labels and the point estimate.
+        self.K_part = int(
+            np.prod(
+                stratum_dims(
+                    self.part_data.data, [f"part_{v}" for v in self.strat_vars_part]
+                )
+            )
+        )
+        self.K_cnt = int(
+            np.prod(
+                stratum_dims(
+                    self.cnt_data.data, [f"cnt_{v}" for v in self.strat_vars_cnt]
+                )
+            )
+        )
 
         # Build contact count tensor
         Y_raw = self._build_contact_tensor()  # (N, K_cnt, D)
@@ -454,18 +477,9 @@ class SocialMixBootstrap:
         ``itertools.product(*category_lists)`` — i.e. row-major over the
         cartesian product of per-variable categories.
         """
-        if not self.strat_vars_part:
-            return np.zeros(len(self.part_data.data), dtype=np.int32)
-
-        code_arrays = [
-            self.part_data.data[f"part_{v}"].cat.codes.values
-            for v in self.strat_vars_part
-        ]
-        dims = tuple(
-            len(self.part_data.data[f"part_{v}"].cat.categories)
-            for v in self.strat_vars_part
-        )
-        return np.ravel_multi_index(code_arrays, dims=dims).astype(np.int32)
+        return stratum_codes(
+            self.part_data.data, [f"part_{v}" for v in self.strat_vars_part]
+        ).astype(np.int32)
 
     def _get_participant_stratum_mapping(self) -> Dict:
         """Create mapping from participant stratum tuple to integer code."""
@@ -522,29 +536,19 @@ class SocialMixBootstrap:
             )
             self.P = pop_sizes.values.astype(np.float64)
         else:
-            # With stratification
-            strat_vars_pop = self.pop_data.get_strat_vars(prefix=False)
-            group_cols = strat_vars_pop + ["age_grp"]
-            pop_sizes = self.pop_data.data.groupby(group_cols, observed=False)[
-                "P"
-            ].sum()
-
-            # Reshape to (K_cnt, D)
-            self.P = np.zeros((self.K_cnt, self.D), dtype=np.float64)
-            cnt_strat_mapping = self._get_contact_stratum_mapping()
-
-            for idx, value in pop_sizes.items():
-                if self.strat_mode == "single":
-                    age_grp = idx
-                    d_code = intervals.index(age_grp)
-                    self.P[d_code] = value
-                else:
-                    # idx is a tuple: (*strat_values, age_grp)
-                    strat_tuple = idx[:-1]
-                    age_grp = idx[-1]
-                    k = cnt_strat_mapping[strat_tuple]
-                    d_code = intervals.index(age_grp)
-                    self.P[k, d_code] = value
+            # With stratification: match population rows to contact strata by
+            # category value, in contact-stratum label order (same helper as the
+            # point estimate).
+            P = population_by_contact_stratum(
+                self.pop_data.data, self.strat_vars_cnt, self.cnt_data.data, n_age=self.D
+            )
+            if P is None:
+                raise ValueError(
+                    "Population data must contain every contact stratification "
+                    f"variable {self.strat_vars_cnt} to compute stratified rates; "
+                    f"got {self.pop_data.get_strat_vars(prefix=False)}."
+                )
+            self.P = P
 
     def _bootstrap_iteration(
         self,
@@ -552,6 +556,7 @@ class SocialMixBootstrap:
         age_codes: NDArray,
         part_strat_codes: Optional[NDArray],
         boot_idx: NDArray,
+        weights: Optional[NDArray] = None,
     ) -> Tuple[Dict[str, NDArray], Dict[str, NDArray]]:
         """
         Execute single bootstrap iteration.
@@ -576,7 +581,7 @@ class SocialMixBootstrap:
         """
         # Aggregate bootstrap sample into Y_boot and N_boot
         Y_boot, N_boot = self._aggregate_bootstrap_sample(
-            Y_raw, age_codes, part_strat_codes, boot_idx
+            Y_raw, age_codes, part_strat_codes, boot_idx, weights
         )
 
         # Compute contact intensities
@@ -597,6 +602,7 @@ class SocialMixBootstrap:
         age_codes: NDArray,
         part_strat_codes: Optional[NDArray],
         boot_idx: NDArray,
+        weights: Optional[NDArray] = None,
     ) -> Tuple[Union[NDArray, Dict[str, NDArray]], Union[NDArray, Dict[str, NDArray]]]:
         """
         Aggregate resampled contacts into Y_boot and N_boot.
@@ -611,6 +617,10 @@ class SocialMixBootstrap:
             Participant stratum codes
         boot_idx : NDArray, shape (N,)
             Bootstrap sample indices
+        weights : NDArray, shape (N,), optional
+            Participant weight of each resampled row. When given, contacts are
+            summed as ``sum_i w_i y_id`` and the denominators are ``sum_i w_i``
+            (the weighted ratio estimator).
 
         Returns
         -------
@@ -630,6 +640,16 @@ class SocialMixBootstrap:
         # Resample
         Y_sampled = Y_raw[boot_idx]  # (N, K_cnt, D)
         age_sampled = age_codes[boot_idx]  # (N,)
+        if weights is not None:
+            Y_sampled = Y_sampled * np.asarray(weights, dtype=np.float64)[:, None, None]
+
+        def count(mask=None):
+            """Participants per age group (or the sum of their weights)."""
+            ages = age_sampled if mask is None else age_sampled[mask]
+            if weights is None:
+                return np.bincount(ages, minlength=self.C).astype(np.int32)
+            w = weights if mask is None else weights[mask]
+            return np.bincount(ages, weights=w, minlength=self.C)
 
         Y_boot_dict = {}
         N_boot_dict = {}
@@ -639,7 +659,7 @@ class SocialMixBootstrap:
             Y_boot = np.zeros((self.C, self.D), dtype=np.float64)
             np.add.at(Y_boot, age_sampled, Y_sampled[:, 0, :])
             Y_boot_dict[label] = Y_boot
-            N_boot_dict[label] = np.bincount(age_sampled, minlength=self.C).astype(np.int32)
+            N_boot_dict[label] = count()
             return Y_boot_dict, N_boot_dict
 
         # Stratified cases
@@ -659,9 +679,7 @@ class SocialMixBootstrap:
                 mask = part_strat_sampled == p
                 age_p = age_sampled[mask]
                 np.add.at(Y_boot_dict[strat_labels[p]], age_p, Y_sampled[mask, 0, :])
-                N_boot_dict[strat_labels[p]] = np.bincount(
-                    age_p, minlength=self.C
-                ).astype(np.int32)
+                N_boot_dict[strat_labels[p]] = count(mask)
 
         elif self.strat_mode == "full":
             part_labels = self._create_participant_stratum_labels()
@@ -680,9 +698,7 @@ class SocialMixBootstrap:
                 for q in range(self.K_cnt):
                     label = f"{part_labels[p]}->{cnt_labels[q]}"
                     np.add.at(Y_boot_dict[label], age_p, Y_p[:, q, :])
-                    N_boot_dict[label] = np.bincount(
-                        age_p, minlength=self.C
-                    ).astype(np.int32)
+                    N_boot_dict[label] = count(mask)
 
         else:  # mixed
             part_labels = self._create_participant_stratum_labels()
@@ -705,9 +721,7 @@ class SocialMixBootstrap:
                     q_label = cnt_labels[q] if self.K_cnt > 1 else "All"
                     label = f"{p_label}->{q_label}"
                     np.add.at(Y_boot_dict[label], age_p, Y_p[:, q, :])
-                    N_boot_dict[label] = np.bincount(
-                        age_p, minlength=self.C
-                    ).astype(np.int32)
+                    N_boot_dict[label] = count(mask)
 
         return Y_boot_dict, N_boot_dict
 

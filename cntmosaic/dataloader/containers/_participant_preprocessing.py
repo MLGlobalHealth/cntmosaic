@@ -24,7 +24,7 @@ def preprocess_participant_data(
     strat_var_cols: List[str],
     repeat_col: Optional[str],
     amb_cnt_col: Optional[str],
-    weight_col: Optional[str] = None,
+    aux_cols: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """
     Validate, clean, and standardise a raw participant DataFrame.
@@ -50,9 +50,10 @@ def preprocess_participant_data(
     amb_cnt_col : Optional[str]
         Column containing ambiguous contact counts. If None, no column is
         created — the field stays None on the parent ParticipantData.
-    weight_col : Optional[str]
-        Column containing individual-level survey weights. If None, no weight
-        column is created. Renamed to 'part_weight' internally.
+    aux_cols : Optional[List[str]]
+        Auxiliary columns kept for weighting. They are renamed with the
+        ``part_`` prefix, are not stratification variables, and keep their
+        missing values (rows are not dropped because of them).
 
     Returns
     -------
@@ -62,9 +63,10 @@ def preprocess_participant_data(
     Raises
     ------
     KeyError
-        If any required column is absent from df_part.
+        If any required or auxiliary column is absent from df_part.
     ValueError
-        If df_part is empty after NaN removal.
+        If df_part is empty after NaN removal, or if an auxiliary column
+        overlaps another declared column or a reserved name.
     """
     required_cols = _check_columns(
         df_part,
@@ -76,8 +78,8 @@ def preprocess_participant_data(
         strat_var_cols,
         repeat_col,
         amb_cnt_col,
-        weight_col,
     )
+    aux_cols = _check_aux_columns(df_part, aux_cols or [], required_cols)
     return _preprocess(
         df_part,
         id_col,
@@ -88,8 +90,48 @@ def preprocess_participant_data(
         strat_var_cols,
         repeat_col,
         required_cols,
-        weight_col,
+        aux_cols,
     )
+
+
+# Canonical names that an auxiliary column may never take.
+_RESERVED_NAMES = frozenset(
+    {"id", "part_age", "part_age_grp", "part_age_min", "part_age_max", "part_repeat"}
+)
+
+
+def _aux_name(col: str) -> str:
+    """Canonical name of an auxiliary column (``part_`` prefix added)."""
+    return col if col.startswith("part_") else f"part_{col}"
+
+
+def _check_aux_columns(
+    df: pd.DataFrame, aux_cols: List[str], required_cols: List[str]
+) -> List[str]:
+    """Check auxiliary columns: present, unique, and not another declared column."""
+    missing = [c for c in aux_cols if c not in df.columns]
+    if missing:
+        raise KeyError(
+            f"aux_cols {missing} are specified but missing in DataFrame.\n"
+            f"  Available columns: {list(df.columns)[:8]}"
+        )
+    duplicated = sorted({c for c in aux_cols if aux_cols.count(c) > 1})
+    if duplicated:
+        raise ValueError(f"aux_cols lists the same column more than once: {duplicated}.")
+    overlap = [c for c in aux_cols if c in required_cols]
+    if overlap:
+        raise ValueError(
+            f"aux_cols {overlap} are already declared as another participant column "
+            f"(id, age, stratification, repeat or ambiguous-count column). "
+            f"An auxiliary column must be a separate column."
+        )
+    reserved = [c for c in aux_cols if _aux_name(c) in _RESERVED_NAMES]
+    if reserved:
+        raise ValueError(
+            f"aux_cols {reserved} would be renamed to a reserved column name "
+            f"({sorted(_RESERVED_NAMES)}). Rename the column first."
+        )
+    return list(aux_cols)
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +149,6 @@ def _check_columns(
     strat_var_cols: List[str],
     repeat_col: Optional[str],
     amb_cnt_col: Optional[str],
-    weight_col: Optional[str] = None,
 ) -> List[str]:
     """
     Assert required columns exist. Return the list of required column names.
@@ -162,12 +203,6 @@ def _check_columns(
             f"  Available columns: {_cols_display(df.columns)}"
         )
 
-    if weight_col and weight_col not in df.columns:
-        raise KeyError(
-            f"weight_col '{weight_col}' is specified but missing in DataFrame.\n"
-            f"  Available columns: {_cols_display(df.columns)}"
-        )
-
     required_cols = [id_col]
     required_cols.extend(age_column)
 
@@ -177,8 +212,6 @@ def _check_columns(
         required_cols.append(repeat_col)
     if amb_cnt_col:
         required_cols.append(amb_cnt_col)
-    if weight_col:
-        required_cols.append(weight_col)
     return required_cols
 
 
@@ -192,7 +225,7 @@ def _preprocess(
     strat_var_cols: List[str],
     repeat_col: Optional[str],
     required_cols: List[str],
-    weight_col: Optional[str] = None,
+    aux_cols: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """
     Copy, clean, coerce dtypes, and rename columns.
@@ -207,7 +240,12 @@ def _preprocess(
     missing_counts = df[required_cols].isnull().sum()
     has_missing = missing_counts.sum() > 0
 
-    df = df[required_cols].dropna().copy()
+    # Rows are dropped only for missing values in required columns. Auxiliary
+    # columns keep their missing values and never cause a row to be dropped
+    # (missing values are handled by the weight factors).
+    aux_cols = aux_cols or []
+    keep = df[required_cols].notna().all(axis=1).to_numpy()
+    df = df.loc[keep, required_cols + aux_cols].copy()
 
     if has_missing:
         n_dropped = n_rows_before - len(df)
@@ -266,8 +304,18 @@ def _preprocess(
     if repeat_col and not repeat_col.startswith("part_"):
         rename_map[repeat_col] = "part_repeat"
 
-    if weight_col and not weight_col.startswith("part_"):
-        rename_map[weight_col] = "part_weight"
+    for col in aux_cols:
+        if not col.startswith("part_"):
+            rename_map[col] = f"part_{col}"
+
+    renamed = [rename_map.get(c, c) for c in df.columns]
+    clashes = sorted({c for c in renamed if renamed.count(c) > 1})
+    if clashes:
+        raise ValueError(
+            f"Column name clash after standardising names: {clashes}. "
+            f"An auxiliary column must not share its canonical name "
+            f"('part_' + name) with another participant column."
+        )
 
     df = df.rename(columns=rename_map)
 

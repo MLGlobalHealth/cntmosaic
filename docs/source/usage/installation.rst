@@ -86,7 +86,7 @@ plan to contribute to ``cntmosaic``.
 
 .. code-block:: bash
 
-   git clone https://github.com/ShozenD/cntmosaic.git
+   git clone https://github.com/MLGlobalHealth/cntmosaic.git
    cd cntmosaic
    pip install -e ".[dev]"
 
@@ -107,7 +107,7 @@ After installation, open a Python session and run:
    import cntmosaic
    print(cntmosaic.__version__)
 
-If you see a version number (e.g. ``0.5.1``), the installation was successful.
+If you see a version number (e.g. ``0.6.0``), the installation was successful.
 
 ----
 
@@ -181,7 +181,7 @@ must use MCMC, you can reduce JAX's memory pre-allocation:
 **Getting help**
 
 If you encounter an error not listed here, please open an issue on
-`GitHub <https://github.com/ShozenD/cntmosaic/issues>`_ and include the
+`GitHub <https://github.com/MLGlobalHealth/cntmosaic/issues>`_ and include the
 output of the following snippet so we can reproduce your environment:
 
 .. code-block:: python

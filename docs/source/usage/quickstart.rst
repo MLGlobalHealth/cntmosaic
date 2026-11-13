@@ -2,7 +2,7 @@ Quickstart
 ==========
 
 .. image:: https://colab.research.google.com/assets/colab-badge.svg
-   :target: https://colab.research.google.com/github/ShozenD/cntmosaic/blob/main/tutorials/00_Quickstart.ipynb
+   :target: https://colab.research.google.com/github/MLGlobalHealth/cntmosaic/blob/main/docs/source/tutorials/00_Quickstart.ipynb
    :alt: Open In Colab
 
 This guide walks through a complete contact matrix estimation workflow using the
@@ -226,7 +226,7 @@ The returned object is an ``altair.Chart``, which can be saved to HTML:
 Next Steps
 ----------
 
-* **Full tutorial** — see the ``tutorials/`` directory for a complete notebook
+* **Full tutorial** — see :doc:`../tutorials/01_Tutorial_GenMix` for a complete notebook
   demonstrating gender-stratified models, MCMC inference, and multi-panel
   visualisations with :class:`GenMixCC <cntmosaic.models.GenMixCC>`.
 * **API reference** — :doc:`../api/models`, :doc:`../api/dataloader`,

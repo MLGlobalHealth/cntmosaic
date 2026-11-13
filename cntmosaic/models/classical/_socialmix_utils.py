@@ -1,9 +1,13 @@
 """
 Data Loading Utilities for SocialMix
 
-This module provides helper classes for loading and processing stratified contact data.
+This module provides helper classes for loading and processing stratified contact data,
+and the proportionate-mixing factorisation of a contact matrix
+(:class:`PropMixFactorisation`, :func:`prop_mix_factorise`).
 """
 
+import warnings
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -13,6 +17,7 @@ from numpy.typing import NDArray
 from ...dataloader import ContactData, ParticipantData, PopulationData
 from ...utils import AgeGroupSpecs
 from ._socialmix_age_processing import AgeBinProcessor
+from ._socialmix_helpers import population_by_contact_stratum, ravel_stratum_codes
 
 if TYPE_CHECKING:
     from ._SocialMix import SocialMix
@@ -125,20 +130,25 @@ class SocialMixDataLoader:
             )
 
     def _compute_Y(self) -> None:
+        """Compute the (unweighted) contact count array and store it as ``Y``."""
+        self.sm.Y = self.compute_Y_array()
+
+    def compute_Y_array(self, part_weights: Optional[pd.Series] = None) -> NDArray:
         """
-        Compute contact count matrix with stratification.
+        Compute the contact count array with stratification.
 
-        When ``part_data.weight_col`` is set, each contact record is multiplied
-        by the participant's survey weight before summation.  If
-        ``self.sm.normalise_weights`` is True, weights are first normalized
-        within each (age_group, stratum) cell so that
-        ``sum(w_i in cell) == N_cell``, preserving the contact intensity
-        estimator ``M = Y / N``. When False (the default), the raw weights
-        supplied by the user are used as-is.
+        Parameters
+        ----------
+        part_weights : pd.Series, optional
+            Weight per participant, indexed by participant id. When given,
+            each contact counts ``w_i`` instead of 1, so the result holds
+            weighted sums ``sum_i w_i y_id``. The loader holds no weight state
+            itself; callers pass weights explicitly (``Prem2`` shares this
+            loader and never does).
 
-        Sets
-        ----
-        self.sm.Y : NDArray
+        Returns
+        -------
+        NDArray
             - Shape (C, D) if K_part == 1 and K_cnt == 1 (no stratification)
             - Shape (K_part, C, D) if K_part > 1 and K_cnt == 1 (partial)
             - Shape (K_part, K_cnt, C, D) if both K_part > 1 and K_cnt > 1 (full/mixed)
@@ -148,22 +158,10 @@ class SocialMixDataLoader:
         age_grps_part = df_part["part_age_grp"].cat.categories
         age_grps_cnt = df_cnt["cnt_age_grp"].cat.categories
 
-        # Normalize weights within (age_group, stratum) cells when present,
-        # unless the caller opted out via SocialMix(normalise_weights=False).
-        has_weights = self.sm.part_data.weight_col is not None
-        if has_weights and self.sm.normalise_weights:
-            grp_cols = ["part_age_grp"] + [
-                f"part_{v}" for v in self.sm.strat_vars_part
-            ]
-            if not self.sm.part_data.check_weights_normalized(grp_cols):
-                self.sm.part_data.normalize_weights(grp_cols)
-
         # Merge participants with contacts
         part_cols = ["id", "part_age_grp"] + [
             f"part_{v}" for v in self.sm.strat_vars_part
         ]
-        if has_weights:
-            part_cols.append("part_weight")
         merged = df_cnt.merge(df_part[part_cols], on="id", how="inner")
 
         if len(merged) == 0:
@@ -172,11 +170,13 @@ class SocialMixDataLoader:
                 "Check that contact IDs match participant IDs."
             )
 
-        # Create the column to aggregate: weighted or raw contact counts
-        if has_weights:
-            merged["_y"] = merged["y"] * merged["part_weight"]
-        else:
+        if part_weights is None:
             merged["_y"] = merged["y"]
+        else:
+            w = merged["id"].map(part_weights)
+            if w.isna().any():
+                raise ValueError("Missing participant weights for some contacts.")
+            merged["_y"] = merged["y"] * w.to_numpy(dtype=np.float64)
 
         if self.sm.K_part == 1 and self.sm.K_cnt == 1:
             # No stratification: simple (C, D) matrix
@@ -190,7 +190,7 @@ class SocialMixDataLoader:
                 columns=pd.Index(age_grps_cnt),
                 fill_value=0,
             )
-            self.sm.Y = Y_df.values.astype(np.float64)
+            return Y_df.values.astype(np.float64)
 
         elif self.sm.K_part > 1 and self.sm.K_cnt == 1:
             # Partial stratification: (K_part, C, D) tensor
@@ -200,7 +200,7 @@ class SocialMixDataLoader:
             ]
             Y_agg = merged.groupby(group_cols, observed=False)["_y"].sum()
 
-            self.sm.Y = self._fill_partial_array(
+            return self._fill_partial_array(
                 Y_agg,
                 shape=(self.sm.K_part, self.sm.C, self.sm.D),
                 strat_vars_part=self.sm.strat_vars_part,
@@ -216,7 +216,7 @@ class SocialMixDataLoader:
             )
             Y_agg = merged.groupby(group_cols, observed=False)["_y"].sum()
 
-            self.sm.Y = self._fill_full_array(
+            return self._fill_full_array(
                 Y_agg,
                 shape=(self.sm.K_part, self.sm.K_cnt, self.sm.C, self.sm.D),
                 strat_vars_part=self.sm.strat_vars_part,
@@ -252,17 +252,26 @@ class SocialMixDataLoader:
 
             self.sm.P = pop_sizes.values.astype(np.float64)
         else:
-            # Stratified: group by strat vars + age
-            group_cols = self.sm.strat_vars_pop + ["age_grp"]
-            pop_sizes = df_pop.groupby(group_cols, observed=False)["P"].sum()
-
-            # Reshape to (K_cnt, D) matrix
-            self.sm.P = self._fill_simple_array(
-                pop_sizes,
-                shape=(self.sm.K_cnt, self.sm.D),
-                strat_vars=self.sm.strat_vars_pop,
-                suffix=None,  # Population data has no part_/cnt_ prefix
+            # Stratified: match population rows to contact strata by category
+            # value, in contact-stratum label order.
+            P = population_by_contact_stratum(
+                df_pop,
+                self.sm.strat_vars_cnt,
+                self.sm.cnt_data.data,
+                n_age=self.sm.D,
             )
+            if P is None:
+                # Population lacks some contact stratification variable:
+                # keep the previous behaviour (rows filled by population codes).
+                group_cols = self.sm.strat_vars_pop + ["age_grp"]
+                pop_sizes = df_pop.groupby(group_cols, observed=False)["P"].sum()
+                P = self._fill_simple_array(
+                    pop_sizes,
+                    shape=(self.sm.K_cnt, self.sm.D),
+                    strat_vars=self.sm.strat_vars_pop,
+                    suffix=None,  # Population data has no part_/cnt_ prefix
+                )
+            self.sm.P = P
 
     def _assign_age_groups_to_population(self) -> None:
         """
@@ -492,11 +501,157 @@ class SocialMixDataLoader:
         if not code_cols:
             return pd.Series(0, index=df.index)
 
-        composite = df[code_cols[0]].astype(int)
-        multiplier = 1
+        # First variable most significant: the order of the stratum labels
+        # (itertools.product) and of the bootstrap.
+        return pd.Series(
+            ravel_stratum_codes([df[c].to_numpy() for c in code_cols], dims),
+            index=df.index,
+        )
 
-        for i in range(1, len(code_cols)):
-            multiplier *= dims[i - 1]
-            composite = composite + multiplier * df[code_cols[i]].astype(int)
 
-        return composite
+# ============================================================================
+# Proportionate-mixing factorisation
+# ============================================================================
+
+
+@dataclass(frozen=True, eq=False)
+class PropMixFactorisation:
+    """Proportionate-mixing factorisation of a contact intensity matrix,
+    ``m[i, j] = c * q * d[i] * a[i, j] * p[j]``.
+
+    Returned by :meth:`SocialMix.prop_mix_factorisation`; see there for the
+    definitions and the mapping to socialmixr's ``split_matrix()``.
+
+    Attributes
+    ----------
+    matrix : np.ndarray, shape (C, C)
+        The factorised contact intensity matrix ``m``.
+    assortativity : np.ndarray, shape (C, C)
+        ``a[i, j] = m[i, j] / (contacts[i] * population_share[j])``. Each row
+        satisfies ``sum_j a[i, j] * population_share[j] = 1``.
+    contacts : np.ndarray, shape (C,)
+        Mean number of contacts of a member of each age group (row sums of ``m``).
+    population_share : np.ndarray, shape (C,)
+        Share of the population in each age group, ``p[j]``.
+    mean_contacts : float
+        Population-weighted mean number of contacts, ``c``.
+    spectral_radius : float
+        Largest eigenvalue of ``m``, ``c * q``.
+    normalisation : float
+        ``q = spectral_radius / mean_contacts``.
+    age_group_specs : AgeGroupSpecs
+        Age groups of the rows and columns.
+    weighted : bool
+        Whether the factorised matrix is the weighted estimate.
+    """
+
+    matrix: NDArray
+    assortativity: NDArray
+    contacts: NDArray
+    population_share: NDArray
+    mean_contacts: float
+    spectral_radius: float
+    normalisation: float
+    age_group_specs: AgeGroupSpecs
+    weighted: bool
+
+    @property
+    def relative_contacts(self) -> NDArray:
+        """``d[i] = contacts[i] / spectral_radius`` (socialmixr's ``$contacts``)."""
+        return self.contacts / self.spectral_radius
+
+    def reconstruct(self) -> NDArray:
+        """``c * q * d[i] * a[i, j] * p[j]``; equals ``matrix`` up to rounding."""
+        return (
+            self.mean_contacts
+            * self.normalisation
+            * self.relative_contacts[:, np.newaxis]
+            * self.assortativity
+            * self.population_share[np.newaxis, :]
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"PropMixFactorisation({len(self.contacts)} age groups, "
+            f"mean_contacts={self.mean_contacts:.3g}, "
+            f"spectral_radius={self.spectral_radius:.3g}, "
+            f"normalisation={self.normalisation:.3g}, weighted={self.weighted})"
+        )
+
+
+def prop_mix_factorise(
+    matrix: NDArray,
+    population: NDArray,
+    age_group_specs: AgeGroupSpecs,
+    weighted: bool = False,
+) -> PropMixFactorisation:
+    """Proportionate-mixing factorisation of a square contact intensity matrix.
+
+    Computes ``m[i, j] = c * q * d[i] * a[i, j] * p[j]`` as socialmixr's
+    ``split_mean_norm_contacts()``: ``r = m.sum(1)``, ``p = P / P.sum()``,
+    ``c = sum(P * r) / sum(P)``, ``rho`` the largest eigenvalue of ``m``,
+    ``q = rho / c`` and ``a[i, j] = m[i, j] / (r[i] * p[j])``.
+
+    Parameters
+    ----------
+    matrix : np.ndarray, shape (C, C)
+        Contact intensity matrix (rows: participant age groups; columns:
+        contact age groups; the same age groups on both sides).
+    population : np.ndarray, shape (C,)
+        Population size of each age group.
+    age_group_specs : AgeGroupSpecs
+        Age groups of the rows and columns.
+    weighted : bool, default False
+        Recorded on the result.
+
+    Returns
+    -------
+    PropMixFactorisation
+
+    Warns
+    -----
+    UserWarning
+        If an age group has no contacts; its row of ``assortativity`` is NaN.
+    """
+    m = np.asarray(matrix, dtype=np.float64)
+    P = np.asarray(population, dtype=np.float64)
+    if m.ndim != 2 or m.shape[0] != m.shape[1] or P.shape != (m.shape[0],):
+        raise ValueError(
+            f"prop_mix_factorise needs a square matrix and one population size per "
+            f"age group; got matrix {m.shape} and population {P.shape}."
+        )
+
+    r = m.sum(axis=1)
+    p = P / P.sum()
+    c = float(np.sum(P * r) / P.sum())
+    eigenvalues = np.linalg.eigvals(np.nan_to_num(m))
+    rho = float(np.real(eigenvalues[np.argmax(np.abs(eigenvalues))]))
+
+    no_contacts = r == 0
+    if no_contacts.any():
+        groups = [
+            f"[{lo}, {hi + 1})"
+            for lo, hi, z in zip(age_group_specs.left, age_group_specs.right, no_contacts)
+            if z
+        ]
+        warnings.warn(
+            f"Age group(s) {groups} report no contacts; their rows of the "
+            f"assortativity matrix are undefined (NaN).",
+            UserWarning,
+            stacklevel=2,
+        )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        a = m / (r[:, np.newaxis] * p[np.newaxis, :])
+    a[no_contacts, :] = np.nan
+
+    return PropMixFactorisation(
+        matrix=m,
+        assortativity=a,
+        contacts=r,
+        population_share=p,
+        mean_contacts=c,
+        spectral_radius=rho,
+        normalisation=rho / c,
+        age_group_specs=age_group_specs,
+        weighted=bool(weighted),
+    )

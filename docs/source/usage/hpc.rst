@@ -138,4 +138,4 @@ For HPC-specific issues (job scheduling, storage, module availability), contact
 the `RCS support team <https://www.imperial.ac.uk/admin-services/ict/self-service/research-support/rcs/>`_.
 
 For issues with ``cntmosaic`` itself, open an issue on
-`GitHub <https://github.com/ShozenD/cntmosaic/issues>`_.
+`GitHub <https://github.com/MLGlobalHealth/cntmosaic/issues>`_.

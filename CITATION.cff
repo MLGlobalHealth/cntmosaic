@@ -1,0 +1,40 @@
+cff-version: 1.2.0
+message: >-
+  If you use cntmosaic in your research, please cite the paper below. If you use
+  any of its estimation methods, please also cite the methodological work in which
+  they were introduced (see the README).
+title: "cntmosaic: social contact matrix estimation in Python"
+type: software
+authors:
+  - given-names: Shozen
+    family-names: Dan
+    affiliation: Imperial College London
+  - given-names: Yiming
+    family-names: Lin
+repository-code: "https://github.com/MLGlobalHealth/cntmosaic"
+url: "https://cntmosaic-docs.readthedocs.io/en/latest/"
+license: BSD-3-Clause
+version: 0.6.0
+keywords:
+  - social contact matrices
+  - contact surveys
+  - infectious disease modelling
+  - Bayesian inference
+preferred-citation:
+  type: article
+  title: Bayesian Modeling and Prediction of Generalized Contact Matrices
+  authors:
+    - given-names: Shozen
+      family-names: Dan
+    - given-names: David A.
+      family-names: van Dyk
+    - given-names: Zhi
+      family-names: Ling
+    - given-names: Swapnil
+      family-names: Mishra
+    - given-names: Oliver
+      family-names: Ratmann
+  year: 2026
+  journal: arXiv preprint
+  doi: 10.48550/arXiv.2605.06742
+  url: "https://arxiv.org/abs/2605.06742"
