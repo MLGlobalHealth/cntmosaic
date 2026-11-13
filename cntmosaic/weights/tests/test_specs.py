@@ -143,7 +143,7 @@ class TestWeights:
         np.testing.assert_allclose(result.participants["composite"], [4.0, 6.0])
         np.testing.assert_allclose(result.participants["weight"], [1.0, 1.0])
         assert list(result.participants["cell"]) == ["c0", "c1"]
-        assert "2 participants" in repr(result)
+        assert "2 respondents" in repr(result)
 
     def test_result_table_source_columns_once_in_factor_order(self):
         ctx = _ctx([1, 2, 3], [0, 0, 1], extra={"part_x": [1.0, 2.0, 3.0]})

@@ -49,7 +49,7 @@ class WeightResult:
         threshold = "" if self.specs.threshold is None else f", threshold={self.specs.threshold:g}"
         return (
             f"WeightResult(factors={list(self.specs.names)}{threshold}: "
-            f"{len(self.participants)} participants in "
+            f"{len(self.participants)} respondents in "
             f"{len(cells)} cells ({int((cells['n'] == 0).sum())} empty); "
             f"smallest n_eff {min_neff:.3g}; largest weight "
             f"{self.participants['weight'].max():.3g}; "
