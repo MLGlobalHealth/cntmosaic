@@ -26,6 +26,13 @@
 
 ### Changed (breaking)
 
+- **`HSGP2D` now uses a tensor-product Matérn kernel by default** (`kernel="product"`), $k(x,x') = \sigma_f^2\,k_\nu(|x_1-x_1'|/\ell_1)\,k_\nu(|x_2-x_2'|/\ell_2)$, with **one lengthscale per grid axis** (`(age_1, age_2)` or `(age_diff, age)`). Previously it used numpyro's two-dimensional spectral density, i.e. an isotropic Matérn on the standardised grid with one shared lengthscale; this is still available as `kernel="isotropic"` and reproduces earlier fits exactly.
+  - The sample sites `gp_lenscale`, `gp_lenscale_diag` and `gp_lenscale_non_diag` gain a trailing axis of size 2 under the product kernel. Other site names and shapes are unchanged.
+  - `lenscale_scale`, `lenscale_min` and `lenscale_max` accept one value per axis (product kernel only). The configuration rules are applied per axis: $\ell_{\min,d} = a_2 L_d / M_d$ and, with an explicit `C`, $\ell_{\max,d} = C_d S_d / a_1$.
+  - The resolved `lenscale_min` and `lenscale_max` are now lists with one value per axis for both kernels (equal values for the isotropic kernel).
+  - Both kernels are evaluated in Kronecker form, $\Phi_1 (\sqrt{W} \circ Z) \Phi_2^\top$, followed by a gather of the grid cells, instead of forming the $N \times M_1 M_2$ basis matrix. This is 7–10× faster per gradient evaluation for 85 ages and $M = 40$ per axis. The attributes `PHI`, `PHI_diag` and `PHI_non_diag` are replaced by `PHI_1`, `PHI_2`, `idx_all` and `idx_sym`.
+  - `gp_scale` is, as before, the marginal **variance** of the GP (it is passed to numpyro as `alpha`); the docstring now says so.
+
 - **`SocialMix(apply_reciprocity=...)` now defaults to `False`** (also in `SocialMix.from_dataframes`). The reciprocity adjustment is a modelling choice and is not appropriate in every analysis, so it must be requested explicitly with `apply_reciprocity=True`. The summarisers already defaulted to `False`.
 - **`load_polymod_uk()` returns the data close to the source**, so that age grouping is done by the user.
   - The precomputed `part_age_grp` and `cnt_age_grp` columns are removed.

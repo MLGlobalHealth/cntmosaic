@@ -31,18 +31,38 @@ The paper derived these constants for one-dimensional GPs. For more than one dim
 
 ## How `HSGP2D` applies the rule
 
-The grid is standardised per axis, so $S_d = \max_i |x_{id}|$ on that scale. One standardised unit is one standard deviation of the grid axis. The lengthscale is isotropic on the standardised grid. We have $\ell_{\min} \le \ell \le \ell_{\max}$, and the axis with the coarsest basis decides each bound.
+The grid is standardised per axis, so $S_d = \max_i |x_{id}|$ on that scale. One standardised unit is one standard deviation of the grid axis.
 
-1. **Upper bound and $C$.** $\ell_{\max}$ is the 95% quantile of HalfNormal(`lenscale_scale`), i.e. $\sigma \cdot \Phi^{-1}(0.975)$, unless the user sets `lenscale_max`. With `C='auto'`, $C_d = \max(a_1 \ell_{\max} / S_d, 1.2)$. With an explicit `C`, $\ell_{\max} = \min_d C_d S_d / a_1$ instead. If the user also gives `lenscale_max` and it exceeds that value, `HSGP2D` warns.
-2. **Lower bound.** $\ell_{\min} = a_2 \max_d (L_d / M_d)$. If the user sets `lenscale_min` below this value, `HSGP2D` warns.
-3. **Prior.** $\ell \sim \text{TruncatedNormal}(0, \sigma, \text{low}=\ell_{\min}, \text{high}=\ell_{\max})$. This is a half-normal with **hard** bounds, so every lengthscale the prior allows is approximated accurately. The truncation is two-sided so that $C$ can be computed from $\ell_{\max}$ directly, with no circular dependence between $C$, $\ell_{\min}$ and the prior's quantiles.
-4. **Errors.** `HSGP2D` raises if $\ell_{\min} \ge \ell_{\max}$, and the message gives the $M$ needed. It warns if any $C_d < 1.2$, as PyMC does. For $\nu = 1/2$ it requires an explicit `C` and `lenscale_min`.
+### Kernels
 
-The resolved values are available after `set_age_bounds` as `C_`, `M_`, `L`, `lenscale_min` and `lenscale_max`. `lenscale_bounds_years` gives the bounds in years along each axis.
+`HSGP2D(kernel=...)` selects the covariance structure. Both kernels use the same basis functions, products of 1D Laplacian eigenfunctions $\phi_j(x_1)\phi_k(x_2)$. They differ only in the spectral weight $W_{jk}$ on each basis function.
+
+- **`kernel="product"` (default).** $k(x, x') = \sigma_f^2\, k_\nu(|x_1 - x_1'|/\ell_1)\, k_\nu(|x_2 - x_2'|/\ell_2)$, with one lengthscale per axis. The weights are the outer product of the two 1D Matérn spectral densities, $W_{jk} = \sigma_f^2 S_{\nu,1}(\sqrt{\lambda_j}; \ell_1)\, S_{\nu,1}(\sqrt{\lambda_k}; \ell_2)$, so the Gram matrix on a product grid is $K_1 \otimes K_2$. On the diff-age grid, $\ell_{\text{age}} > \ell_{\text{age diff}}$ smooths along cohorts while keeping the assortative diagonal sharp.
+- **`kernel="isotropic"`.** $k(x, x') = \sigma_f^2\, k_\nu(\lVert x - x' \rVert/\ell)$, with one shared lengthscale. The weights are the two-dimensional Matérn spectral density evaluated at $(\sqrt{\lambda_j}, \sqrt{\lambda_k})$. This is what `numpyro.contrib.hsgp` implements and what cntmosaic used up to 0.5.0. Its weights do not factorise for any Matérn $\nu$, so it is **not** a product kernel; only the squared exponential is both.
+
+Both kernels are evaluated in Kronecker form: $F = \Phi_1 (\sqrt{W} \circ Z)\, \Phi_2^\top$ on the rectangle spanned by the unique values of each axis, followed by a gather of the required cells. Both grids are subsets of such a rectangle. The diff-age grid's $A^2$ points lie in the $(2A-1) \times A$ rectangle.
+
+`gp_scale` is the marginal variance $\sigma_f^2$ (it is passed to numpyro as `alpha`).
+
+### Bounds
+
+The 1D rules apply directly to each factor of the product kernel. The isotropic kernel's shared lengthscale must satisfy both axes at once, so the binding axis decides.
+
+| | `kernel="product"` (per axis $d$) | `kernel="isotropic"` (shared) |
+|---|---|---|
+| Upper bound, `C='auto'` | $\ell_{\max,d}$ = 95% quantile of HalfNormal(`lenscale_scale`$_d$); $C_d = \max(a_1 \ell_{\max,d}/S_d, 1.2)$ | $\ell_{\max}$ = 95% quantile; $C_d = \max(a_1 \ell_{\max}/S_d, 1.2)$ |
+| Upper bound, explicit `C` | $\ell_{\max,d} = C_d S_d / a_1$ | $\ell_{\max} = \min_d C_d S_d / a_1$ |
+| Lower bound | $\ell_{\min,d} = a_2 L_d / M_d$ | $\ell_{\min} = a_2 \max_d (L_d / M_d)$ |
+
+1. **User overrides.** `lenscale_scale`, `lenscale_min` and `lenscale_max` may be one value per axis under the product kernel. `HSGP2D` warns if a user `lenscale_max` exceeds what `C` supports, or if a user `lenscale_min` is below what `M` can represent; the product-kernel messages name the axis.
+2. **Prior.** $\ell \sim \text{TruncatedNormal}(0, \sigma, \text{low}=\ell_{\min}, \text{high}=\ell_{\max})$, per axis for the product kernel. This is a half-normal with **hard** bounds, so every lengthscale the prior allows is approximated accurately. The truncation is two-sided so that $C$ can be computed from $\ell_{\max}$ directly, with no circular dependence between $C$, $\ell_{\min}$ and the prior's quantiles.
+3. **Errors.** `HSGP2D` raises if $\ell_{\min} \ge \ell_{\max}$ (on any axis), and the message gives the $M$ needed. It warns if any $C_d < 1.2$, as PyMC does. For $\nu = 1/2$ it requires an explicit `C` and `lenscale_min`.
+
+The resolved values are available after `set_age_bounds` as `C_`, `M_`, `L`, `lenscale_min` and `lenscale_max` (lists with one value per axis; equal values for the isotropic kernel). `lenscale_bounds_years` gives the bounds in years along each axis.
 
 ### Range of representable lengthscales
 
-When $C$ is above its 1.2 floor, steps 1 and 2 give $\ell_{\max} / \ell_{\min} = M / (a_1 a_2)$. For Matérn 5/2 this is about $M / 10.9$. **Only $M$ controls how wide a range of lengthscales the approximation covers.** `lenscale_scale` moves the range up or down.
+When $C$ is above its 1.2 floor, the upper and lower bounds give $\ell_{\max} / \ell_{\min} = M / (a_1 a_2)$. For Matérn 5/2 this is about $M / 10.9$. **Only $M$ controls how wide a range of lengthscales the approximation covers.** `lenscale_scale` moves the range up or down.
 
 ### Grid types
 
@@ -53,7 +73,7 @@ When $C$ is above its 1.2 floor, steps 1 and 2 give $\ell_{\max} / \ell_{\min} =
 
 ## Defaults and worked numbers
 
-Defaults: $\nu = 5/2$, `lenscale_scale` $= 0.5$, $M = 40$ per axis, which gives 1600 basis functions. The numbers below are for ages 0–84, computed with `_configure_hsgp`.
+Defaults: $\nu = 5/2$, `lenscale_scale` $= 0.5$, $M = 40$ per axis, which gives 1600 basis functions. The numbers below are for ages 0–84, computed with `_configure_hsgp`. With the defaults, the per-axis bounds of the product kernel coincide with the shared bounds of the isotropic kernel. Under `C='auto'` every axis gets $L_d = a_1 \ell_{\max}$, so $\ell_{\min,d} = a_2 L_d / M_d$ is the same on both axes.
 
 | Grid | $C$ | $\ell$ range (standardised) | $\ell$ range (years) |
 |---|---|---|---|
@@ -71,7 +91,7 @@ Other choices considered for ages 0–84 on the age-age grid:
 
 ### Accuracy check
 
-`test_default_config_is_accurate_on_prior_support` compares the HSGP covariance $\Phi\,\mathrm{diag}(S(\sqrt{\lambda}))\,\Phi^\top$ with the exact Matérn 5/2 covariance on 300 random grid points, for ages 0–84. With unit variance, the maximum absolute error is:
+`test_default_config_is_accurate_on_prior_support` compares the HSGP covariance $\Phi\,\mathrm{diag}(W)\,\Phi^\top$ with the exact Matérn 5/2 covariance, isotropic or product according to `kernel`, on 300 random grid points, for ages 0–84. Both kernels stay below 0.05 at both bounds. With unit variance, the maximum absolute error for the isotropic kernel is:
 
 | Lengthscale | age-age | diff-age |
 |---|---|---|
@@ -80,6 +100,8 @@ Other choices considered for ages 0–84 on the age-age grid:
 | $\ell_{\min} / 2$ | 0.165 | 0.165 |
 
 So the lower bound matters: below it, the approximation underestimates the prior variance by about 16%.
+
+**Caveat at the 1.2 floor.** When the floor binds ($a_1 \ell_{\max} / S_d < 1.2$), the rule does not guarantee this accuracy near the grid edges, for either kernel. Example: diff-age, `lenscale_scale=0.3`, $M = 80$. The age-difference axis gets $C = 1.2$, and the maximum covariance error at $\ell_{\max}$ is 0.16 (isotropic) or 0.23 (product, that axis alone). `test_product_accurate_with_unequal_lengthscales` therefore uses settings where the floor does not bind.
 
 ## Using non-default settings
 
@@ -90,6 +112,9 @@ HSGP2D(prior_type="global", M=60)                         # finer basis: lower l
 HSGP2D(prior_type="global", lenscale_scale=1.0)           # longer lengthscales: larger C
 HSGP2D(prior_type="global", C=[1.5, 1.5], M=[20, 20])     # explicit C: lenscale_max derived from C
 HSGP2D(prior_type="global", lenscale_min=0.4, lenscale_max=0.8)  # explicit prior bounds
+HSGP2D(prior_type="global", grid_type="diff-age", M=[80, 40])     # finer basis on the age-difference axis
+HSGP2D(prior_type="global", lenscale_scale=[0.5, 1.0])           # per-axis lengthscale scales (product kernel)
+HSGP2D(prior_type="global", kernel="isotropic")                  # pre-0.6 isotropic kernel
 ```
 
 ## Next steps
@@ -99,7 +124,8 @@ HSGP2D(prior_type="global", lenscale_min=0.4, lenscale_max=0.8)  # explicit prio
   - Dirichlet–Neumann averaging (Kutri & Scheichl, 2024), which cancels the boundary terms.
 
   This is out of scope for this iteration.
-- **Per-axis $M$ for diff-age.** With an isotropic lengthscale on the standardised grid, the age-difference axis resolves about 9 years where the age axis resolves about 6.5. Equal resolution in years would need an anisotropic lengthscale.
+- **Per-axis $M$ for diff-age.** With the default $M = [40, 40]$, the age-difference axis resolves lengthscales down to about 9 years and the age axis down to about 6.5 years. The product kernel has per-axis lengthscales, so a sharper assortative diagonal only needs a larger $M$ on the age-difference axis (e.g. `M=[80, 40]`). Changing `GRID_DEFAULTS['diff-age']` is open.
+- **Floor of $C$.** See the caveat above: when the 1.2 floor binds, the maximum covariance error near the edges exceeds 0.05.
 - **Post-fit check.** Riutort-Mayol et al. (Sec. 4.5) refit with larger $M$ and $C$ when the posterior lengthscale reaches the representable limit. Under hard truncation the equivalent signal is posterior mass piling up at $\ell_{\min}$ or $\ell_{\max}$. Not implemented.
 
 ## References

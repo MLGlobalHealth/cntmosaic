@@ -109,47 +109,72 @@ def hsgp_boundary_factor(
     return np.maximum(a1 * lenscale_max / S, MIN_BOUNDARY_FACTOR)
 
 
-def hsgp_max_lenscale(
+def hsgp_max_lenscale_per_axis(
     C: ArrayLike, S: ArrayLike, nu: float
-) -> float:
+) -> np.ndarray:
     """
-    Largest lengthscale a given boundary factor supports.
+    Largest lengthscale a given boundary factor supports, per axis.
 
-    Inverts ``c_d >= a1 * ell / S_d`` and takes the binding axis:
-    ``ell_max = min_d(c_d * S_d / a1)``.
+    Inverts ``c_d >= a1 * ell_d / S_d``: ``ell_max_d = c_d * S_d / a1``.
     """
     a1, _ = kernel_constants(nu)
     L = np.atleast_1d(np.asarray(C, dtype=float)) * np.atleast_1d(
         np.asarray(S, dtype=float)
     )
-    return float(np.min(L / a1))
+    return L / a1
+
+
+def hsgp_max_lenscale(
+    C: ArrayLike, S: ArrayLike, nu: float
+) -> float:
+    """
+    Largest shared (isotropic) lengthscale a given boundary factor supports.
+
+    Inverts ``c_d >= a1 * ell / S_d`` and takes the binding axis:
+    ``ell_max = min_d(c_d * S_d / a1)``.
+    """
+    return float(np.min(hsgp_max_lenscale_per_axis(C, S, nu)))
+
+
+def hsgp_min_lenscale_per_axis(
+    L: ArrayLike, M: ArrayLike, nu: float
+) -> np.ndarray:
+    """
+    Smallest lengthscale ``M_d`` basis functions on ``[-L_d, L_d]`` can represent, per axis.
+
+    Inverts ``m_d >= a2 * L_d / ell_d``: ``ell_min_d = a2 * L_d / M_d``. This is the
+    rule for a tensor-product kernel, whose 1D factors are approximated separately.
+    """
+    _, a2 = kernel_constants(nu)
+    L = np.atleast_1d(np.asarray(L, dtype=float))
+    M = np.atleast_1d(np.asarray(M, dtype=float))
+    return a2 * L / M
 
 
 def hsgp_min_lenscale(
     L: ArrayLike, M: ArrayLike, nu: float
 ) -> float:
     """
-    Smallest lengthscale ``M`` basis functions on ``[-L, L]`` can represent.
+    Smallest shared (isotropic) lengthscale ``M`` basis functions on ``[-L, L]`` can represent.
 
     Inverts ``m_d >= a2 * L_d / ell`` and takes the binding axis:
-    ``ell_min = a2 * max_d(L_d / M_d)``. The lengthscale is isotropic, so the
-    axis with the coarsest basis decides.
+    ``ell_min = a2 * max_d(L_d / M_d)``. The lengthscale is shared, so the axis
+    with the coarsest basis decides.
     """
-    _, a2 = kernel_constants(nu)
-    L = np.atleast_1d(np.asarray(L, dtype=float))
-    M = np.atleast_1d(np.asarray(M, dtype=float))
-    return float(a2 * np.max(L / M))
+    return float(np.max(hsgp_min_lenscale_per_axis(L, M, nu)))
 
 
 def hsgp_min_num_basis(
-    L: ArrayLike, lenscale_min: float, nu: float
+    L: ArrayLike, lenscale_min: ArrayLike, nu: float
 ) -> List[int]:
     """
     Minimum number of basis functions per axis for the smallest lengthscale.
 
-    ``m_d = ceil(a2 * L_d / lenscale_min)``.
+    ``m_d = ceil(a2 * L_d / lenscale_min_d)``. ``lenscale_min`` may be a scalar
+    (shared lengthscale) or one value per axis.
     """
     _, a2 = kernel_constants(nu)
     L = np.atleast_1d(np.asarray(L, dtype=float))
+    lmin = np.broadcast_to(np.asarray(lenscale_min, dtype=float), L.shape)
     # Small tolerance so that exact integers are not bumped up by round-off.
-    return [int(math.ceil(a2 * Ld / lenscale_min - 1e-9)) for Ld in L]
+    return [int(math.ceil(a2 * Ld / ld - 1e-9)) for Ld, ld in zip(L, lmin)]
