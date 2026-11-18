@@ -64,6 +64,7 @@ The tutorial figure helpers `save_tutorial_figure()`, `list_tutorial_figures()`,
 
 ### Fixed
 
+- **Demographic multipliers out of order in `GenMix*` models.** With a FULL stratification variable followed by another variable (e.g. `strat_var_cols=["gender", "ethn"]` on both sides), `StratificationData.compute_demopty` returned the multipliers in (source strata, target strata) order, while `log_delta` and the full labels interleave source and target per variable. The model therefore subtracted the wrong population offset from most cross-strata blocks, and the fitted matrices were not reciprocal. The multipliers are now built from the full labels, row by row. **Fits with two or more stratification variables must be rerun.** Single-variable fits, and fits in which only the last variable is FULL, are unaffected. See `docs/dev_docs/bug_multiplier_ordering.md`.
 - **Stratum order.** With two or more participant stratification variables, `SocialMix` (and `Prem2`) filed point estimates under the wrong stratum labels, and they disagreed with the bootstrap. Results for two or more participant strata change.
 - **Unused contact categories.** A contact stratification variable with an unused category raised an `IndexError`.
 - **Population strata order.** Stratified population data is now matched to contact strata by category value, so the order of variables and categories in the population data no longer matters.
