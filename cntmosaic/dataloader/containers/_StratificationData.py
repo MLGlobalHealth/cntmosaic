@@ -1,5 +1,6 @@
 import warnings
 from dataclasses import dataclass
+from itertools import product
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -495,11 +496,12 @@ class StratificationData:
                 A = Q.shape[1]
                 reshaped = mult_array.reshape(n_strata * n_strata, A, A)
 
-                # For marginal full case the target labels equal the source labels
-                strat_labels_target = strat_labels_source
+                # Row n = s * n_strata + t pairs source s with target t.
+                pair_sources = [s for s in strat_labels_source for _ in strat_labels_source]
+                pair_targets = [t for _ in strat_labels_source for t in strat_labels_source]
 
                 margin_dempoty[var] = self._handle_nans(
-                    reshaped, strat_labels_source, strat_labels_target, mode="FULL"
+                    reshaped, pair_sources, pair_targets, mode="FULL"
                 )
 
             else:
@@ -523,7 +525,10 @@ class StratificationData:
         strat_modes : Dict[str, StratMode]
             Dictionary mapping stratification variable names to their StratMode (PARTIAL or FULL).
         strat_labels : List, optional
-            List of stratification labels to maintain consistent ordering. If None, will be inferred from data.
+            Full stratification labels (``"<source>-><target>"``) as produced by
+            ``infer_full_strat_labels``. FULL rows are returned in this order,
+            which must match the model's ``log_delta``. If None, the same order
+            is inferred from the data.
 
         Notes
         -----
@@ -534,7 +539,7 @@ class StratificationData:
         -------
         NDArray
             - PARTIAL: shape (n_strata, A, 1)
-            - FULL: shape (n_strata**2, A, A)
+            - FULL: shape (len(strat_labels), A, A), row n for strat_labels[n]
         """
         strat_vars_source = list(strat_modes.keys())
         strat_vars_target = [
@@ -543,49 +548,88 @@ class StratificationData:
         if len(strat_vars_source) == 0:
             raise ValueError("No stratification variables provided")
 
-        # Determine source label ordering if caller provided flat full-labels
-        strat_labels_source = None
-        if strat_labels is not None and not isinstance(strat_labels, dict):
-            strat_labels_source = list(
-                dict.fromkeys(l.split("->")[0] for l in strat_labels)
-            )
-
-        Q_sa, strat_labels_source = self._build_Q_and_labels(
-            strat_vars_source, strat_labels_for_vars=strat_labels_source
-        )
-
         # =======================================================================
-        # PARTIAL case: single variable stratification
+        # PARTIAL case: no FULL variables, one row per source stratum
         # =======================================================================
         if len(strat_vars_target) == 0:
+            strat_labels_source = None
+            if strat_labels is not None and not isinstance(strat_labels, dict):
+                strat_labels_source = list(
+                    dict.fromkeys(l.split("->")[0] for l in strat_labels)
+                )
+            Q_sa, strat_labels_source = self._build_Q_and_labels(
+                strat_vars_source, strat_labels_for_vars=strat_labels_source
+            )
             result = Q_sa[:, :, None]  # shape (n_strata, A, 1)
             return self._handle_nans(result, strat_labels_source, None, mode="PARTIAL")
 
         # =======================================================================
-        # FULL case: compute outer product for source × target
+        # FULL case: one source x target outer product per full label
         # =======================================================================
-        # Build target Q and labels (if FULL exists)
-        strat_labels_target = None
-        if strat_labels is not None and not isinstance(strat_labels, dict):
-            strat_labels_target = list(
-                dict.fromkeys(l.split("->")[1] for l in strat_labels)
-            )
+        # Row n of the result must match ``strat_labels[n]``: the model
+        # subtracts log(multipliers) from log_delta by position, and log_delta
+        # is ordered like the full labels. Those interleave source and target
+        # per variable (e.g. sex, sex', ethn, ethn'), so the multipliers are
+        # looked up by label rather than by reshaping a (source, target)
+        # outer product, whose flat order (sex, ethn, sex', ethn') differs
+        # as soon as a FULL variable is followed by another variable.
+        if strat_labels is None or isinstance(strat_labels, dict):
+            strat_labels = self._default_full_labels(strat_modes)
 
+        pair_sources = [label.split("->")[0] for label in strat_labels]
+        pair_targets = [label.split("->")[1] for label in strat_labels]
+
+        Q_sa, strat_labels_source = self._build_Q_and_labels(
+            strat_vars_source,
+            strat_labels_for_vars=list(dict.fromkeys(pair_sources)),
+        )
         Q_tb, strat_labels_target = self._build_Q_and_labels(
-            strat_vars_target, strat_labels_for_vars=strat_labels_target
+            strat_vars_target,
+            strat_labels_for_vars=list(dict.fromkeys(pair_targets)),
         )
-        Q_stab = Q_sa[:, None, :, None] * Q_tb[None, :, None, :]
-        n_strata_source, n_strata_target, A = (
-            Q_sa.shape[0],
-            Q_tb.shape[0],
-            Q_sa.shape[1],
-        )
+        source_ix = {label: i for i, label in enumerate(strat_labels_source)}
+        target_ix = {label: i for i, label in enumerate(strat_labels_target)}
+        s_ix = [source_ix[label] for label in pair_sources]
+        t_ix = [target_ix[label] for label in pair_targets]
 
-        result = Q_stab.reshape(n_strata_source * n_strata_target, A, A)
+        # result[n, a, b] = Q_sa[s_n, a] * Q_tb[t_n, b]
+        result = Q_sa[s_ix][:, :, None] * Q_tb[t_ix][:, None, :]
 
-        return self._handle_nans(
-            result, strat_labels_source, strat_labels_target, mode="FULL"
-        )
+        return self._handle_nans(result, pair_sources, pair_targets, mode="FULL")
+
+    def _default_full_labels(self, strat_modes: Dict[str, StratMode]) -> List[str]:
+        """
+        Full stratification labels in the order the model uses.
+
+        Mirrors ``infer_full_strat_labels``: the per-variable labels
+        (``"a->b"`` for FULL, ``"a->All"`` for PARTIAL) are combined with the
+        rightmost variable varying fastest.
+
+        Parameters
+        ----------
+        strat_modes : Dict[str, StratMode]
+            Stratification variables and their modes, in model order.
+
+        Returns
+        -------
+        List[str]
+            Labels of the form ``"<source>-><target>"``.
+        """
+        per_var_labels = []
+        for var, mode in strat_modes.items():
+            _, categories = self._build_Q_and_labels([var])
+            if mode == StratMode.FULL:
+                per_var_labels.append([(a, b) for a in categories for b in categories])
+            else:
+                per_var_labels.append([(a, None) for a in categories])
+
+        full_labels = []
+        for combo in product(*per_var_labels):
+            source = "_".join(str(a) for a, _ in combo)
+            targets = [str(b) for _, b in combo if b is not None]
+            target = "_".join(targets) if targets else "All"
+            full_labels.append(f"{source}->{target}")
+        return full_labels
 
     def _handle_nans(
         self,
@@ -602,9 +646,10 @@ class StratificationData:
         multipliers : NDArray
             The computed multipliers array that may contain NaN values.
         strat_labels_source : NDArray
-            Labels for source strata.
+            PARTIAL: label of each stratum (row). FULL: source label of each
+            row of ``multipliers``.
         strat_labels_target : NDArray, optional
-            Labels for target strata (only for FULL mode).
+            FULL only: target label of each row of ``multipliers``.
         mode : str
             Either 'PARTIAL' or 'FULL' to determine warning message format.
 
@@ -636,20 +681,13 @@ class StratificationData:
                 f"Verify your population proportion data completeness."
             )
         else:  # FULL mode
-            # Shape: (n_strata_source * n_strata_target, A, A)
-            affected_pairs = set()
-            n_strata_source = len(strat_labels_source)
-            n_strata_target = len(strat_labels_target)
-
-            for combined_idx in range(multipliers.shape[0]):
-                if nan_mask[combined_idx].any():
-                    source_idx = combined_idx // n_strata_target
-                    target_idx = combined_idx % n_strata_target
-                    pair = (
-                        strat_labels_source[source_idx],
-                        strat_labels_target[target_idx],
-                    )
-                    affected_pairs.add(pair)
+            # Shape: (n_pairs, A, A); row n pairs strat_labels_source[n]
+            # with strat_labels_target[n].
+            affected_pairs = {
+                (strat_labels_source[n], strat_labels_target[n])
+                for n in range(multipliers.shape[0])
+                if nan_mask[n].any()
+            }
 
             warning_msg = (
                 f"Found {nan_count} NaN values in stratified multipliers (FULL mode). "

@@ -139,8 +139,8 @@ class AgeMixFC(AgeMixFCNumPyroMixin, GenMix):
     ...     "rate": HSGP2D(
     ...         grid_type="diff-age",
     ...         prior_type="global",
-    ...         ell_alpha=2.0,
-    ...         ell_beta=0.5
+    ...         M=40,               # basis functions per axis (sets lenscale_min)
+    ...         lenscale_scale=0.5  # half-normal scale (sets lenscale_max and C)
     ...     )
     ... }
     >>>

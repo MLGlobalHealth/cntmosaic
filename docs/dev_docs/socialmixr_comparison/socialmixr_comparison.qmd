@@ -1,0 +1,492 @@
+---
+title: "cntmosaic `SocialMix` vs socialmixr: numerical comparison"
+subtitle: "Contact matrices from the socialmixr introductory vignette, computed with both packages"
+date: today
+format:
+  html:
+    embed-resources: true
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    code-overflow: wrap
+    df-print: kable
+execute:
+  echo: true
+  warning: true
+  message: false
+---
+
+```{r setup, include = FALSE}
+# Python: the cntmosaic development environment.
+reticulate::use_python(
+  Sys.getenv(
+    "RETICULATE_PYTHON",
+    "/Users/shozen/Imperial/0_Research/cntmosaic/.venv/bin/python"
+  ),
+  required = TRUE
+)
+library(socialmixr)
+library(data.table)
+library(knitr)
+setDTthreads(1)
+opts_chunk$set(collapse = TRUE, comment = "#>")
+```
+
+# Purpose
+
+cntmosaic is a Python package for estimating social contact matrices. Its class `SocialMix` implements the classical estimator used in socialmixr: the mean number of reported contacts by participant and contact age group. It also implements socialmixr's post-processing: symmetrisation, per-capita rates, and the split into assortativity components.
+
+This document checks numerically that `SocialMix` gives the same results as socialmixr. It uses the examples in the socialmixr introductory vignette (`vignettes/socialmixr.Rmd`, "Introduction to socialmixr"). Each socialmixr example is run in R as written in the vignette, the same matrix is computed with cntmosaic in Python, and the two are compared element by element.
+
+The comparison covers only the parts that the two packages are meant to share. cntmosaic deliberately differs from socialmixr in its bootstrap, its participant weighting, and its generalised (multi-dimensional) matrices. Those parts are listed in @sec-out-of-scope but not compared.
+
+**Versions.**
+
+```{r versions}
+smr_clone <- "/Users/shozen/Imperial/0_Research/socialmixr"
+cat(
+  "R:                     ", R.version.string, "\n",
+  "socialmixr (installed):", as.character(packageVersion("socialmixr")), "\n",
+  "socialmixr local clone:",
+  system2("git", c("-C", smr_clone, "log", "-1", "--format='%h %ad %s'",
+                   "--date=short"), stdout = TRUE), "\n",
+  sep = " "
+)
+```
+
+```{python versions-py}
+import subprocess, sys, platform
+import cntmosaic
+sha = subprocess.run(
+    ["git", "-C", "/Users/shozen/Imperial/0_Research/cntmosaic",
+     "log", "-1", "--format=%h %ad %s", "--date=short"],
+    capture_output=True, text=True,
+).stdout.strip()
+print(f"Python:     {platform.python_version()}")
+print(f"cntmosaic:  {cntmosaic.__version__} ({sha})")
+```
+
+To render this document, run the following from the cntmosaic repository root. It needs R with socialmixr and `reticulate` installed, and the cntmosaic Python environment:
+
+```sh
+RETICULATE_PYTHON=$PWD/.venv/bin/python quarto render \
+  docs/dev_docs/socialmixr_comparison/socialmixr_comparison.qmd
+```
+
+# Contents of the socialmixr introductory vignette
+
+The table lists the sections of the vignette and says which ones are compared here.
+
+| Vignette section | Content | Compared? |
+|---|---|---|
+| The pipeline workflow | `survey[...]` → `assign_age_groups()` → `weigh()` → `compute_matrix()` → post-processing. Example: POLYMOD UK, `age_limits = c(0, 1, 5, 15)` | **Yes** (C1–C4) |
+| Assigning age groups | Imputing ages from ranges; dropping or keeping missing ages; assigning age groups | **Partly.** Both packages use the ages imputed by socialmixr (@sec-data). cntmosaic's handling of missing ages is compared in C1 and C3 |
+| Surveys; a note on truncated surveys | Loading surveys from Zenodo; censored contact counts | No. This is data access, not estimation |
+| Bootstrapping | Resampling participants with a helper function | No. cntmosaic's bootstrap is a different procedure |
+| Demography | Population tables, `align_ages()`, WPP data, graduating coarse populations | Used as input only (the vignette's `uk_pop` and `de_pop`) |
+| Symmetric contact matrices | $m'_{ij} = (m_{ij}N_i + m_{ji}N_j)/(2N_i)$ via `symmetrise()` | **Yes** (C6) |
+| Contact rates per capita | $c_{ij} = m_{ij}/N_j$ via `per_capita()`, combined with `symmetrise()` | **Yes** (C7) |
+| Splitting contact matrices | $m_{ij} = c\,q\,d_i\,a_{ij}\,n_j$ via `split_matrix()` | **Yes** (C8) |
+| Filtering | Contact matrices for school, work with physical contact, and daily home contacts with males | **Yes** (C5) |
+| Participant weights: day of week and age, user-defined weights, weight threshold, numerical example | `weigh()`, `weigh_by_dayofweek()`, `weigh_by_age()`, `compute_matrix(weight_threshold = )` | No. cntmosaic's weighting is designed differently (@sec-out-of-scope) |
+| Plotting | `ggplot2` and `matrix_plot()` | No |
+
+The separate vignette on multidimensional matrices (`multidimensional.qmd`) is not compared either. cntmosaic's stratified ("generalised") matrices are a different design.
+
+# Data and harmonisation {#sec-data}
+
+Both packages are given the same data: the `polymod` survey shipped with socialmixr. cntmosaic's own `load_polymod_uk()` is not used, because it is already filtered (966 rather than 1012 UK participants) and comes with census population data.
+
+The two packages share the estimator but organise preprocessing differently. This section lists the differences and how they are aligned. None of them concerns the estimator itself.
+
+1. **Age ranges.** Some POLYMOD contacts have only an age range (`cnt_age_est_min`, `cnt_age_est_max`). socialmixr's `assign_age_groups()` sets these to the midpoint of the range by default. `SocialMix` has no range imputation and needs one age per contact. Both packages therefore use the ages imputed by socialmixr. They are taken from `assign_age_groups()` with `missing_*_age = "keep"`, so that rows with no age at all stay in the data and each package handles them itself.
+2. **Contacts with a missing age.** socialmixr's default, `missing_contact_age = "remove"`, removes every participant who reported a contact without an age. `SocialMix` drops only the contact, which corresponds to socialmixr's `"ignore"`. The vignette uses the default. To reproduce it, the Python code removes those participants before calling `SocialMix` (`missing_contact_age="remove"` in the helper below). Check C3 uses `"ignore"` in R, with no Python pre-step, to test cntmosaic's own handling.
+3. **Participants with a missing age.** Both packages drop them: socialmixr with `missing_participant_age = "remove"`, cntmosaic in `ParticipantData`. No alignment is needed.
+4. **Open last age group.** socialmixr's last age group has no upper limit (e.g. `[15,Inf)`). `AgeGroupSpecs` in cntmosaic has closed groups, so the last one is set to end at age 120, above the oldest age in POLYMOD. Both packages use left-closed groups $[a_k, a_{k+1})$.
+5. **Population.** cntmosaic receives the vignette's population tables per age group, as a categorical column of intervals (`pop_age_grp`). socialmixr receives them through `align_ages()`.
+
+```{r data-export}
+data(polymod)
+polymod_ages <- assign_age_groups(
+  polymod,
+  missing_participant_age = "keep",
+  missing_contact_age = "keep"
+)
+# Imputation is per row and drops nothing:
+stopifnot(
+  nrow(polymod_ages$participants) == nrow(polymod$participants),
+  nrow(polymod_ages$contacts) == nrow(polymod$contacts)
+)
+# Ages as double: reticulate maps integer NA to INT_MIN, but double NA to NaN.
+part_shared <- polymod_ages$participants[, .(
+  part_id, part_age = as.numeric(part_age), country
+)]
+cnt_shared <- polymod_ages$contacts[, .(
+  part_id, cnt_age = as.numeric(cnt_age),
+  cnt_home = as.numeric(cnt_home), cnt_work = as.numeric(cnt_work),
+  cnt_school = as.numeric(cnt_school), phys_contact = as.numeric(phys_contact),
+  cnt_gender, duration_multi = as.numeric(duration_multi)
+)]
+cat(
+  "participants:", nrow(part_shared),
+  "| missing age:", sum(is.na(part_shared$part_age)), "\n",
+  "contacts:    ", nrow(cnt_shared),
+  "| missing age:", sum(is.na(cnt_shared$cnt_age)), "\n"
+)
+```
+
+## Python helpers
+
+`run_socialmix()` builds a `SocialMix` fit from the shared tables. Apart from the age-group specification, its only preprocessing is the optional removal described in item 2 above. Everything else, including dropping participants with missing ages, binning ages and computing the matrix, is done by cntmosaic. `compare()` records the largest absolute and relative differences from socialmixr for the summary in @sec-summary.
+
+```{python helpers}
+import warnings
+import numpy as np
+import pandas as pd
+from cntmosaic.models.classical import SocialMix
+from cntmosaic.utils import AgeGroupSpecs
+
+pd.set_option("display.precision", 8, "display.width", 120)
+
+part_shared = r.part_shared
+cnt_shared = r.cnt_shared
+TOL = 1e-10
+results = []
+
+
+def limits_to_specs(limits, top=120):
+    """socialmixr age_limits -> AgeGroupSpecs; the open last group ends at `top`."""
+    limits = [int(a) for a in limits]
+    return AgeGroupSpecs(age_min=limits, age_max=[a - 1 for a in limits[1:]] + [top])
+
+
+def labels(limits):
+    """socialmixr's age-group labels, e.g. '[0,1)', ..., '[15,Inf)'."""
+    limits = [int(a) for a in limits]
+    upper = [str(a) for a in limits[1:]] + ["Inf"]
+    return [f"[{lo},{hi})" for lo, hi in zip(limits, upper)]
+
+
+def run_socialmix(part, cnt, limits, pop=None, apply_reciprocity=False,
+                  missing_contact_age="remove"):
+    """Fit SocialMix to socialmixr-style participant and contact tables.
+
+    missing_contact_age="remove" mirrors socialmixr's default (drop participants
+    with any contact of unknown age); "ignore" leaves the contacts to cntmosaic,
+    which drops only the contacts.
+    """
+    if missing_contact_age == "remove":
+        bad = cnt.loc[cnt["cnt_age"].isna(), "part_id"].unique()
+        part = part[~part["part_id"].isin(bad)]
+        cnt = cnt[~cnt["part_id"].isin(bad)]
+    specs = limits_to_specs(limits)
+    df_part = pd.DataFrame({"id": part["part_id"].to_numpy(),
+                            "part_age": part["part_age"].to_numpy()})
+    df_cnt = pd.DataFrame({"id": cnt["part_id"].to_numpy(),
+                           "cnt_age": cnt["cnt_age"].to_numpy(), "y": 1})
+    df_pop = None
+    if pop is not None:
+        groups = pd.IntervalIndex.from_breaks(specs.bins, closed="left")
+        df_pop = pd.DataFrame({"pop_age_grp": pd.Categorical(groups),
+                               "P": np.asarray(pop, dtype=float)})
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        sm = SocialMix.from_dataframes(df_part, df_cnt, specs, df_pop=df_pop,
+                                       apply_reciprocity=apply_reciprocity)
+    for w in caught:  # report cntmosaic's preprocessing messages briefly
+        print("cntmosaic warning:", str(w.message).splitlines()[0][:150])
+    return sm
+
+
+def compare(check, quantity, r_value, py_value, r_labels=None, py_labels=None,
+            show=True):
+    """Compare a socialmixr result with the cntmosaic result."""
+    r_value = np.atleast_1d(np.asarray(r_value, dtype=float))
+    py_value = np.atleast_1d(np.asarray(py_value, dtype=float))
+    if r_labels is not None:
+        assert list(r_labels) == list(py_labels), (r_labels, py_labels)
+    assert r_value.shape == py_value.shape, (r_value.shape, py_value.shape)
+    diff = np.abs(r_value - py_value)
+    max_abs = float(np.nanmax(diff))
+    denom = np.where(np.abs(r_value) > 0, np.abs(r_value), np.nan)
+    max_rel = float(np.nanmax(diff / denom)) if np.isfinite(denom).any() else 0.0
+    same_nan = bool((np.isnan(r_value) == np.isnan(py_value)).all())
+    ok = max_abs <= TOL and same_nan
+    results.append(dict(check=check, quantity=quantity, shape="x".join(map(str, r_value.shape)),
+                        max_abs_diff=max_abs, max_rel_diff=max_rel,
+                        result="PASS" if ok else "FAIL"))
+    if show and r_value.ndim == 2:
+        lab = py_labels if py_labels is not None else range(r_value.shape[0])
+        print("cntmosaic:")
+        print(pd.DataFrame(py_value, index=lab, columns=lab))
+    print(f"{quantity}: max |diff| = {max_abs:.3g}, max rel. diff = {max_rel:.3g} "
+          f"-> {'PASS' if ok else 'FAIL'}")
+```
+
+# Checks
+
+Each check has three parts:
+
+- an R chunk containing the vignette code (the matrix is printed as in the vignette);
+- a Python chunk computing the same quantity with `SocialMix`;
+- a comparison of the two.
+
+A check passes if the largest absolute difference is at most $10^{-10}$ and missing values (NaN) are in the same places. Both packages compute the same ratios of sums, so they should agree to floating-point precision.
+
+The matrices are oriented the same way in both packages: rows are participant age groups and columns are contact age groups. `compare()` asserts that the age-group labels match.
+
+## C1. Core contact matrix (POLYMOD UK, 4 age groups)
+
+This is the first example in the vignette. Each entry is the mean number of contacts that a participant in the row's age group reported with people in the column's age group.
+
+```{r c1}
+uk_c1 <- polymod[country == "United Kingdom"] |>
+  assign_age_groups(age_limits = c(0, 1, 5, 15)) |>
+  compute_matrix()
+uk_c1
+stopifnot(names(dimnames(uk_c1$matrix))[1] == "age.group")
+r_c1 <- unclass(uk_c1$matrix)
+r_c1_labels <- rownames(uk_c1$matrix)
+r_c1_n <- uk_c1$participants$participants
+```
+
+```{python c1-py}
+lim = [0, 1, 5, 15]
+uk_part = part_shared[part_shared["country"] == "United Kingdom"]
+uk_cnt = cnt_shared[cnt_shared["part_id"].isin(uk_part["part_id"])]
+
+sm_c1 = run_socialmix(uk_part, uk_cnt, lim)
+compare("C1", "matrix", r.r_c1, sm_c1.cint()["All->All"].central,
+        r.r_c1_labels, labels(lim))
+compare("C1", "participants per age group", r.r_c1_n, sm_c1.N, show=False)
+```
+
+## C2. Finer age groups (POLYMOD UK, 16 age groups)
+
+C2 is the same computation with 5-year age groups up to `[75,Inf)`. It is not in the vignette. It is included as a harder test: many cells have few participants, and the age-group boundaries fall inside the age ranges of many contacts.
+
+```{r c2}
+uk_c2 <- polymod[country == "United Kingdom"] |>
+  assign_age_groups(age_limits = seq(0, 75, 5)) |>
+  compute_matrix()
+r_c2 <- unclass(uk_c2$matrix)
+r_c2_labels <- rownames(uk_c2$matrix)
+r_c2_n <- uk_c2$participants$participants
+round(uk_c2$matrix[1:5, 1:5], 4)  # top-left corner
+```
+
+```{python c2-py}
+lim = list(range(0, 80, 5))
+sm_c2 = run_socialmix(uk_part, uk_cnt, lim)
+compare("C2", "matrix", r.r_c2, sm_c2.cint()["All->All"].central,
+        r.r_c2_labels, labels(lim), show=False)
+compare("C2", "participants per age group", r.r_c2_n, sm_c2.N, show=False)
+```
+
+## C3. Missing contact ages ignored (`missing_contact_age = "ignore"`)
+
+C3 uses `missing_contact_age = "ignore"`, which is how `SocialMix` behaves by default, so the Python side runs no pre-step. The 3 UK contacts with no age are passed to cntmosaic, which drops them and warns. The participant who reported them is kept, so there are 1012 participants rather than 1011.
+
+```{r c3}
+uk_c3 <- polymod[country == "United Kingdom"] |>
+  assign_age_groups(age_limits = c(0, 1, 5, 15), missing_contact_age = "ignore") |>
+  compute_matrix()
+uk_c3
+r_c3 <- unclass(uk_c3$matrix)
+r_c3_n <- uk_c3$participants$participants
+```
+
+```{python c3-py}
+lim = [0, 1, 5, 15]
+sm_c3 = run_socialmix(uk_part, uk_cnt, lim, missing_contact_age="ignore")
+compare("C3", "matrix", r.r_c3, sm_c3.cint()["All->All"].central,
+        r.r_c1_labels, labels(lim))
+compare("C3", "participants per age group", r.r_c3_n, sm_c3.N, show=False)
+```
+
+## C4. Contact counts (`counts = TRUE`)
+
+`compute_matrix(counts = TRUE)` returns the total number of contacts in each cell instead of the mean. `SocialMix` keeps these sums in the attribute `Y`.
+
+```{r c4}
+uk_c4 <- polymod[country == "United Kingdom"] |>
+  assign_age_groups(age_limits = c(0, 1, 5, 15)) |>
+  compute_matrix(counts = TRUE)
+uk_c4$matrix
+r_c4 <- unclass(uk_c4$matrix)
+```
+
+```{python c4-py}
+compare("C4", "counts", r.r_c4, sm_c1.Y, r.r_c1_labels, labels([0, 1, 5, 15]))
+```
+
+## C5. Filtering (all POLYMOD countries pooled)
+
+The vignette's filtering examples use the whole `polymod` survey, so the eight countries are pooled into one sample. They use `age_limits = c(0, 20, 60)`.
+
+In socialmixr, a filter on contact columns removes contacts and keeps every participant (`[.contact_survey`, `R/subset-contact-survey.R`). Participants left without contacts therefore count as having zero contacts. On the cntmosaic side the contact table is filtered the same way, with an unknown value treated as not matching, as data.table does. The full participant table is kept.
+
+The pooled data also contain 65 participants without an age. socialmixr's `assign_age_groups()` drops them; on the Python side `ParticipantData` drops them, which is the warning printed below.
+
+```{r c5}
+c5_school <- polymod[cnt_school == 1] |>
+  assign_age_groups(age_limits = c(0, 20, 60)) |>
+  compute_matrix()
+c5_work <- polymod[cnt_work == 1][phys_contact == 1] |>
+  assign_age_groups(age_limits = c(0, 20, 60)) |>
+  compute_matrix()
+c5_home <- polymod[cnt_home == 1][cnt_gender == "M"][duration_multi == 5] |>
+  assign_age_groups(age_limits = c(0, 20, 60)) |>
+  compute_matrix()
+c5_school
+r_c5 <- lapply(list(school = c5_school, work = c5_work, home = c5_home),
+               function(x) unclass(x$matrix))
+r_c5_n <- lapply(list(school = c5_school, work = c5_work, home = c5_home),
+                 function(x) x$participants$participants)
+r_c5_labels <- rownames(c5_school$matrix)
+```
+
+```{python c5-py}
+lim = [0, 20, 60]
+is_ = lambda col, val: cnt_shared[col].eq(val).fillna(False)
+filters = {
+    "school": is_("cnt_school", 1),
+    "work": is_("cnt_work", 1) & is_("phys_contact", 1),
+    "home": is_("cnt_home", 1) & is_("cnt_gender", "M") & is_("duration_multi", 5),
+}
+for name, keep in filters.items():
+    print(f"--- {name}")
+    sm = run_socialmix(part_shared, cnt_shared[keep], lim)
+    compare("C5", f"matrix ({name})", r.r_c5[name], sm.cint()["All->All"].central,
+            r.r_c5_labels, labels(lim), show=(name == "school"))
+    compare("C5", f"participants per age group ({name})", r.r_c5_n[name], sm.N,
+            show=False)
+```
+
+## C6. Symmetric contact matrix (POLYMOD UK with `uk_pop`)
+
+$m'_{ij} = (m_{ij}N_i + m_{ji}N_j)/(2N_i)$, using the vignette's constructed UK population. In cntmosaic this is `apply_reciprocity=True`. socialmixr warns because the age groups differ greatly in population size; this is expected in the vignette too.
+
+```{r c6}
+uk_pop <- data.frame(
+  age = limits_to_age_groups(c(0, 1, 5, 15), notation = "brackets"),
+  population = c(750000, 3200000, 7500000, 56000000)
+)
+uk_matrix <- polymod[country == "United Kingdom"] |>
+  assign_age_groups(age_limits = c(0, 1, 5, 15)) |>
+  compute_matrix()
+uk_sym <- uk_matrix |> symmetrise(survey_pop = align_ages(uk_pop, uk_matrix))
+uk_sym
+r_c6 <- unclass(uk_sym$matrix)
+```
+
+```{python c6-py}
+lim = [0, 1, 5, 15]
+uk_pop = r.uk_pop["population"].to_numpy()
+sm_c6 = run_socialmix(uk_part, uk_cnt, lim, pop=uk_pop, apply_reciprocity=True)
+compare("C6", "symmetrised matrix", r.r_c6, sm_c6.cint()["All->All"].central,
+        r.r_c1_labels, labels(lim))
+```
+
+## C7. Per-capita contact rates (POLYMOD Germany with `de_pop`, symmetrised)
+
+$c'_{ij} = (m_{ij}N_i + m_{ji}N_j)/(2N_iN_j)$. In cntmosaic this is `rate()` on a fit with `apply_reciprocity=True`.
+
+```{r c7}
+de_pop <- data.frame(
+  age = limits_to_age_groups(c(0, 60), notation = "brackets"),
+  population = c(67000000, 16000000)
+)
+de_matrix <- polymod[country == "Germany"] |>
+  assign_age_groups(age_limits = c(0, 60)) |>
+  compute_matrix()
+de_pc <- de_matrix |>
+  symmetrise(survey_pop = align_ages(de_pop, de_matrix)) |>
+  per_capita(survey_pop = align_ages(de_pop, de_matrix))
+de_pc
+r_c7 <- unclass(de_pc$matrix)
+r_c7_labels <- rownames(de_pc$matrix)
+```
+
+```{python c7-py}
+lim = [0, 60]
+de_part = part_shared[part_shared["country"] == "Germany"]
+de_cnt = cnt_shared[cnt_shared["part_id"].isin(de_part["part_id"])]
+sm_c7 = run_socialmix(de_part, de_cnt, lim, pop=r.de_pop["population"].to_numpy(),
+                      apply_reciprocity=True)
+pc = sm_c7.rate()["All->All"].central
+print("cntmosaic (scientific notation):")
+print(pd.DataFrame(pc, index=labels(lim), columns=labels(lim)).map("{:.6e}".format))
+compare("C7", "per-capita rates", r.r_c7, pc, r.r_c7_labels, labels(lim), show=False)
+```
+
+## C8. Split contact matrix (POLYMOD UK with `uk_pop`)
+
+$m_{ij} = c\,q\,d_i\,a_{ij}\,n_j$. The cntmosaic names of the components are listed in the docstring of `SocialMix.prop_mix_factorisation()`:
+
+| socialmixr | cntmosaic | symbol |
+|---|---|---|
+| `$matrix` | `assortativity` | $a_{ij}$ |
+| `$mean.contacts` | `mean_contacts` | $c$ |
+| `$normalisation` | `normalisation` | $q$ |
+| `$contacts` | `relative_contacts` | $d_i$ |
+
+```{r c8}
+uk_split <- uk_matrix |> split_matrix(survey_pop = align_ages(uk_pop, uk_matrix))
+uk_split
+r_c8 <- list(
+  matrix = unclass(uk_split$matrix),
+  mean_contacts = uk_split$mean.contacts,
+  normalisation = uk_split$normalisation,
+  contacts = uk_split$contacts
+)
+```
+
+```{python c8-py}
+lim = [0, 1, 5, 15]
+sm_c8 = run_socialmix(uk_part, uk_cnt, lim, pop=uk_pop)
+fac = sm_c8.prop_mix_factorisation()
+compare("C8", "split: matrix / assortativity a_ij", r.r_c8["matrix"], fac.assortativity,
+        r.r_c1_labels, labels(lim))
+compare("C8", "split: mean.contacts / mean_contacts c", r.r_c8["mean_contacts"], fac.mean_contacts)
+compare("C8", "split: normalisation / normalisation q", r.r_c8["normalisation"], fac.normalisation)
+compare("C8", "split: contacts / relative_contacts d_i", r.r_c8["contacts"], fac.relative_contacts)
+```
+
+# Summary {#sec-summary}
+
+```{python summary-df}
+summary = pd.DataFrame(results)
+n_fail = int((summary["result"] == "FAIL").sum())
+print(f"{len(summary)} comparisons, {n_fail} failed")
+```
+
+```{r summary-table, echo = FALSE}
+s <- reticulate::py$summary
+s$max_abs_diff <- formatC(s$max_abs_diff, format = "e", digits = 1)
+s$max_rel_diff <- formatC(s$max_rel_diff, format = "e", digits = 1)
+kable(s, col.names = c("Check", "Quantity", "Shape", "Max. abs. diff.",
+                       "Max. rel. diff.", "Result"))
+```
+
+```{r summary-assert, include = FALSE}
+# Make a failed check visible when rendering.
+if (reticulate::py$n_fail > 0) warning("Some comparisons FAILED; see the summary table.")
+```
+
+In every check, `SocialMix` agrees with socialmixr to floating-point precision. Once the inputs are aligned as described in @sec-data, the two packages give the same mean contact matrix, the same participant counts, contact counts, filtered matrices, symmetrised matrix and per-capita rates, and the same split-matrix components.
+
+The real differences between the packages are in preprocessing, not in the estimator:
+
+- cntmosaic has no age-range imputation; it expects one age per contact.
+- When a contact has no age, cntmosaic drops only that contact. socialmixr's default drops the participant.
+- The last age group in cntmosaic is closed, whereas socialmixr's is open-ended. If contacts are older than the top of the last cntmosaic group, they are silently left out of the matrix.
+
+# Not compared {#sec-out-of-scope}
+
+These parts of cntmosaic are designed differently from socialmixr on purpose, so their results are not expected to agree.
+
+- **Participant weights.** In cntmosaic, weights are normalised within each age group × stratum cell. The day-of-week weights match the 5:2 split within each age group by default, where socialmixr matches it over the whole sample. A missing day gets a neutral factor of 1. The design is in `docs/dev_docs/dev_plan_weights.md`, and the socialmixr behaviours we think are problematic are in `docs/dev_docs/socialmixr_issues.md` (S1–S3).
+- **Bootstrap.** `SocialMix` resamples participants and refits the weights in each replicate. The vignette's bootstrap is a short helper around `compute_matrix()`.
+- **Generalised (stratified) matrices.** cntmosaic estimates matrices stratified by participant and contact characteristics (e.g. sex × sex), using its own reciprocity rule between strata. socialmixr's multidimensional matrices (`multidimensional.qmd`) work differently.
+- **Adaptive merging of age groups** (`adaptive_merge=True`). This cntmosaic feature merges sparse age groups and has no socialmixr counterpart.

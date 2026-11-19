@@ -256,8 +256,10 @@ class TestDemopty:
             ]
         ).T  # shape (3, 6)
 
-        expected = prop_array[:, None, :, None] * prop_array[None, :, None, :]
-        expected = expected.reshape(36, 3, 3)
+        # Rows follow the full labels, interleaved per variable:
+        # (stratum1, stratum1', stratum2, stratum2').
+        Q = prop_array.reshape(2, 3, 3)  # (stratum1, stratum2, age)
+        expected = np.einsum("ika,jlb->ijklab", Q, Q).reshape(36, 3, 3)
         np.testing.assert_allclose(props, expected)
 
     def test_mixed_prop_multi(self, df_strat_multi_var):
@@ -287,8 +289,9 @@ class TestDemopty:
             ]
         ).T  # shape (2, 3)
 
-        expected = prop_s1[:, None, :, None] * prop_s2[None, :, None, :]
-        expected = expected.reshape(12, 3, 3)
+        # Rows follow the full labels: (stratum1, stratum1', stratum2).
+        Q_source = prop_s1.reshape(2, 3, 3)  # (stratum1, stratum2, age)
+        expected = np.einsum("ika,jb->ijkab", Q_source, prop_s2).reshape(12, 3, 3)
         np.testing.assert_allclose(props, expected)
 
     def test_compute_demopty_partial_age_min_max(self, df_strat_age_min_max):
