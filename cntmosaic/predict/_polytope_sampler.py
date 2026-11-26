@@ -264,6 +264,11 @@ def _step(
     t = jax.random.uniform(key_t, dtype=x.dtype, minval=t_lo, maxval=t_hi)
     # If the polytope is a single point then d = 0 and the chord is unbounded.
     x_new = x + jnp.where(jnp.isfinite(t), t, 0.0) * d
+    if symmetric:
+        # The compiled update may round a cell and its mirror differently; restore
+        # exact symmetry.  This keeps the margins, since the row and column sums
+        # are equal, and keeps every cell non-negative.
+        x_new = (x_new + x_new.T) / 2
     if any(fixed):
         # Reset the fixed diagonal to prevent drift from rounding (section A.5.6).
         x_new = jnp.where(jnp.diag(jnp.array(fixed)), x, x_new)
