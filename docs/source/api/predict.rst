@@ -15,11 +15,31 @@ Predictor
 Utility Functions
 -----------------
 
-.. autofunction:: cntmosaic.predict.feasible_mixing_bounds
+.. autofunction:: cntmosaic.predict.z_marginals
+
+.. autofunction:: cntmosaic.predict.sample_full_counts
+
+.. autofunction:: cntmosaic.predict.counts_to_intensities
 
 .. autofunction:: cntmosaic.predict.spectral_radius
 
-.. autofunction:: cntmosaic.predict.z_marginals
+Transportation Polytope Sampler
+-------------------------------
+
+.. autofunction:: cntmosaic.predict.sample_swap
+
+.. autofunction:: cntmosaic.predict.sample_swap_path
+
+.. autofunction:: cntmosaic.predict.sample_transportation_polytope
+
+.. autofunction:: cntmosaic.predict.check_margins
+
+.. autofunction:: cntmosaic.predict.diagonal_is_feasible
+
+Deprecated
+----------
+
+.. autofunction:: cntmosaic.predict.feasible_mixing_bounds
 
 .. autofunction:: cntmosaic.predict.sample_eta
 
