@@ -156,6 +156,18 @@ def diagonal_is_feasible(
     )
 
 
+def _mirror_upper(x: Array) -> Array:
+    """
+    Make ``x`` exactly symmetric by copying its upper triangle onto the lower one.
+
+    Averaging ``(x + x^T) / 2`` is not reliably exact: the compiler may round
+    a cell and its mirror differently when it fuses the averaging with the
+    computation of ``x``.  Copying involves no arithmetic.
+    """
+    upper = jnp.triu(jnp.ones(x.shape, dtype=bool))
+    return jnp.where(upper, x, x.T)
+
+
 def _double_center(z: Array, mask: Array) -> Array:
     """
     Remove the row and column means of ``z`` over the cells in ``mask``.
@@ -266,9 +278,9 @@ def _step(
     x_new = x + jnp.where(jnp.isfinite(t), t, 0.0) * d
     if symmetric:
         # The compiled update may round a cell and its mirror differently; restore
-        # exact symmetry.  This keeps the margins, since the row and column sums
-        # are equal, and keeps every cell non-negative.
-        x_new = (x_new + x_new.T) / 2
+        # exact symmetry.  The table was symmetric up to rounding, so the margins
+        # change only by rounding error, and every cell stays non-negative.
+        x_new = _mirror_upper(x_new)
     if any(fixed):
         # Reset the fixed diagonal to prevent drift from rounding (section A.5.6).
         x_new = jnp.where(jnp.diag(jnp.array(fixed)), x, x_new)
@@ -306,7 +318,7 @@ def _quasi_independence(
     y, _ = jax.lax.while_loop(
         not_converged, sweep, sweep((free.astype(row_res.dtype), 0))
     )
-    return (y + y.T) / 2 if symmetric else y
+    return _mirror_upper((y + y.T) / 2) if symmetric else y
 
 
 def _start(

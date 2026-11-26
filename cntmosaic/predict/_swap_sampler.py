@@ -40,6 +40,7 @@ from jax.typing import ArrayLike
 from ._polytope_sampler import (
     _chord,
     _fixed_diagonal,
+    _mirror_upper,
     _start,
     check_margins,
     independence_table,
@@ -211,7 +212,7 @@ def _move_step(
     A move that would change a fixed diagonal cell is not admissible (B.4) and
     is skipped.  The entries of ``d`` are 0, +-1 or +-2, so a step to an end
     of the chord sets that cell to zero exactly.  After the step, symmetric
-    tables are symmetrised and fixed diagonal cells are reset to ``delta``
+    tables are made exactly symmetric and fixed diagonal cells are reset to ``delta``
     against rounding.
     """
     d = jnp.where(jnp.any((d != 0) & fixed_cells), 0.0, d)
@@ -220,7 +221,7 @@ def _move_step(
     # If the move is skipped then d = 0 and the chord is unbounded.
     x = x + jnp.where(jnp.isfinite(t), t, 0.0) * d
     if symmetric:
-        x = (x + x.T) / 2
+        x = _mirror_upper(x)
     return jnp.where(fixed_cells, jnp.diag(delta), x)
 
 
