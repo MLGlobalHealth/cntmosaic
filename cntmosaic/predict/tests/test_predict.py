@@ -24,18 +24,26 @@ def stack_counts(counts):
     return np.stack([np.stack([counts[f"{k}->{l}"] for l in STRATA], 1) for k in STRATA], 1)
 
 
+@pytest.fixture(scope="module", params=["swap", "hit_and_run"])
+def sampler(request):
+    """Run the tests with both samplers."""
+    return request.param
+
+
 @pytest.fixture(scope="module")
 def z_marg():
     return make_z_marginals()
 
 
 @pytest.fixture(scope="module")
-def X(z_marg):
-    return stack_counts(sample_full_counts(z_marg, jax.random.key(0), num_warmup=50))
+def X(z_marg, sampler):
+    return stack_counts(
+        sample_full_counts(z_marg, jax.random.key(0), num_warmup=50, sampler=sampler)
+    )
 
 
-def test_shapes(z_marg):
-    counts = sample_full_counts(z_marg, jax.random.key(0), num_warmup=5)
+def test_shapes(z_marg, sampler):
+    counts = sample_full_counts(z_marg, jax.random.key(0), num_warmup=5, sampler=sampler)
     assert set(counts) == {f"{k}->{l}" for k in STRATA for l in STRATA}
     assert all(v.shape == (S, A, A) for v in counts.values())
 
@@ -56,11 +64,13 @@ def test_non_negative(X):
     assert np.all(X >= -1e-6 * X.max())
 
 
-def test_unequal_totals_are_reconciled(z_marg):
+def test_unequal_totals_are_reconciled(z_marg, sampler):
     tilt = np.triu(np.full((A, A), 1.1)) + np.tril(np.ones((A, A)), -1)
     z_tilted = {k: v * tilt for k, v in z_marg.items()}
     with pytest.warns(UserWarning, match="rescaled to their average"):
-        counts = sample_full_counts(z_tilted, jax.random.key(1), num_warmup=5)
+        counts = sample_full_counts(
+            z_tilted, jax.random.key(1), num_warmup=5, sampler=sampler
+        )
     X = stack_counts(counts)
     np.testing.assert_allclose(X, X.transpose(0, 2, 1, 4, 3), rtol=1e-6)
     assert np.all(X >= -1e-6 * X.max())
@@ -91,11 +101,12 @@ class TestAssortativity:
         return make_z_marginals(concentration=50.0)
 
     @pytest.fixture(scope="class")
-    def X_eta(self, z_even):
+    def X_eta(self, z_even, sampler):
         with warnings.catch_warnings():
             warnings.simplefilter("error")  # no table may need shrinking
             counts = sample_full_counts(
-                z_even, jax.random.key(2), num_warmup=50, assortativity=self.eta
+                z_even, jax.random.key(2), num_warmup=50, assortativity=self.eta,
+                sampler=sampler,
             )
         return stack_counts(counts)
 
@@ -121,11 +132,12 @@ class TestAssortativity:
         np.testing.assert_allclose(X_eta, X_eta.transpose(0, 2, 1, 4, 3), rtol=1e-6)
         assert np.all(X_eta >= -1e-6 * X_eta.max())
 
-    def test_per_draw_fractions(self, z_even):
+    def test_per_draw_fractions(self, z_even, sampler):
         eta = np.random.default_rng(2).uniform(0.3, 0.5, size=(S, A, A))
         X = stack_counts(
             sample_full_counts(
-                z_even, jax.random.key(6), num_warmup=5, assortativity={"b": eta}
+                z_even, jax.random.key(6), num_warmup=5, assortativity={"b": eta},
+                sampler=sampler,
             )
         )
         a, b = np.tril_indices(A)
@@ -133,10 +145,11 @@ class TestAssortativity:
             X[:, 1, 1][:, a, b], eta[:, a, b] * z_even["b"][:, a, b], rtol=1e-5
         )
 
-    def test_infeasible_fractions_are_shrunk(self, z_marg):
+    def test_infeasible_fractions_are_shrunk(self, z_marg, sampler):
         with pytest.warns(UserWarning, match="infeasible for"):
             counts = sample_full_counts(
-                z_marg, jax.random.key(3), num_warmup=5, assortativity={"a": 0.99}
+                z_marg, jax.random.key(3), num_warmup=5, assortativity={"a": 0.99},
+                sampler=sampler,
             )
         X = stack_counts(counts)
         Z = np.stack([z_marg[k] for k in STRATA], 1)
@@ -167,3 +180,8 @@ class TestAssortativity:
             sample_full_counts(
                 z2, jax.random.key(5), num_warmup=1, assortativity={"a": 0.3, "b": 0.3}
             )
+
+
+def test_unknown_sampler_raises(z_marg):
+    with pytest.raises(ValueError, match="sampler must be one of"):
+        sample_full_counts(z_marg, jax.random.key(7), sampler="gibbs")

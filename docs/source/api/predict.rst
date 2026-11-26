@@ -30,7 +30,7 @@ Transportation Polytope Sampler
 
 .. autofunction:: cntmosaic.predict.sample_swap_path
 
-.. autofunction:: cntmosaic.predict.sample_transportation_polytope
+.. autofunction:: cntmosaic.predict.sample_hit_run
 
 .. autofunction:: cntmosaic.predict.check_margins
 

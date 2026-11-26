@@ -404,7 +404,7 @@ def _fixed_diagonal(r: Array, c: Array, diagonal: ArrayLike) -> Tuple[Array, tup
     return jnp.where(jnp.isnan(diagonal), 0.0, diagonal), fixed
 
 
-def sample_transportation_polytope(
+def sample_hit_run(
     key: Array,
     row_sums: ArrayLike,
     col_sums: ArrayLike,
@@ -490,7 +490,7 @@ def sample_transportation_polytope(
     Examples
     --------
     >>> import jax
-    >>> tables = sample_transportation_polytope(
+    >>> tables = sample_hit_run(
     ...     jax.random.key(0), [3.0, 1.0], [2.0, 2.0], num_samples=100
     ... )
     >>> tables.shape

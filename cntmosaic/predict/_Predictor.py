@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 import jax
 from numpy.typing import ArrayLike, NDArray
@@ -104,8 +104,9 @@ class Predictor:
     def predict_full_matrices(
         self,
         key: jax.Array,
-        num_warmup: int = 1600,
+        num_warmup: Optional[int] = None,
         assortativity: Optional[Dict[str, ArrayLike]] = None,
+        sampler: Literal["swap", "hit_and_run"] = "swap",
     ) -> Dict[str, NDArray]:
         """
         Sample fully stratified contact intensity matrices.
@@ -114,7 +115,7 @@ class Predictor:
         ``K x K`` table of fully stratified contact counts is known only
         through its row sums ``z^k_ab`` and, by reciprocity, its column sums
         ``z^l_ba``.  Each table is drawn uniformly from all non-negative
-        tables with these margins using the hit-and-run sampler (see
+        tables with these margins, with swap moves by default (see
         :func:`sample_full_counts`), and the counts are divided by the
         stratified population sizes to give contact intensities.
 
@@ -130,11 +131,11 @@ class Predictor:
         ----------
         key : jax.Array
             JAX PRNG key.
-        num_warmup : int, optional
-            Number of hit-and-run steps per table (default 1600).  See
-            :func:`sample_transportation_polytope` for how this default was
-            chosen.  With two strata (``K = 2``) a single step is already an
-            exact draw, so ``num_warmup=0`` suffices.
+        num_warmup : int or None, optional
+            Burn-in per table: sweeps of ``K * K`` moves for swap moves, steps
+            for hit-and-run.  If ``None`` (default), 10 sweeps or 1600 steps.
+            With two strata (``K = 2``) the tables are drawn exactly, and the
+            burn-in is irrelevant.
         assortativity : Dict[str, ArrayLike] or None, optional
             Dictionary mapping stratum labels to assortativity fractions in
             ``[0, 1]``: a scalar, an ``(A, A)`` array indexed by respondent
@@ -142,6 +143,8 @@ class Predictor:
             draw.  Only entries with respondent age ``a >= b`` are used.
             Strata that are left out are not constrained.  With two strata at
             most one can be given, and it then determines the table.
+        sampler : {"swap", "hit_and_run"}, optional
+            Sampler for the tables (default ``"swap"``).
 
         Returns
         -------
@@ -153,7 +156,11 @@ class Predictor:
         """
         self._ensure_z_marginals()
         counts = sample_full_counts(
-            self._z_marg, key, num_warmup=num_warmup, assortativity=assortativity
+            self._z_marg,
+            key,
+            num_warmup=num_warmup,
+            assortativity=assortativity,
+            sampler=sampler,
         )
         return counts_to_intensities(counts, _compute_P_sa(self.dataloader))
 
@@ -161,8 +168,9 @@ class Predictor:
         self,
         key: jax.Array,
         method: str = "generalised",
-        num_warmup: int = 1600,
+        num_warmup: Optional[int] = None,
         assortativity: Optional[Dict[str, ArrayLike]] = None,
+        sampler: Literal["swap", "hit_and_run"] = "swap",
     ) -> Union[float, NDArray]:
         """
         Compute the spectral radius of the predicted fully stratified matrices.
@@ -176,11 +184,13 @@ class Predictor:
             JAX PRNG key passed to :meth:`predict_full_matrices`.
         method : {"generalised", "age"}, optional
             Spectral radius method (default ``"generalised"``).
-        num_warmup : int, optional
-            Number of hit-and-run steps per table, passed to
-            :meth:`predict_full_matrices` (default 1600).
-        assortativity : Dict[str, float] or None, optional
+        num_warmup : int or None, optional
+            Burn-in per table, passed to :meth:`predict_full_matrices`.
+        assortativity : Dict[str, ArrayLike] or None, optional
             Assortativity fractions passed to :meth:`predict_full_matrices`.
+        sampler : {"swap", "hit_and_run"}, optional
+            Sampler passed to :meth:`predict_full_matrices` (default
+            ``"swap"``).
 
         Returns
         -------
@@ -189,7 +199,7 @@ class Predictor:
             posterior sample matrices.
         """
         matrices = self.predict_full_matrices(
-            key, num_warmup=num_warmup, assortativity=assortativity
+            key, num_warmup=num_warmup, assortativity=assortativity, sampler=sampler
         )
         return _spectral_radius_fn(matrices, self.dataloader, method=method)
 

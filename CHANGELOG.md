@@ -23,10 +23,10 @@
 - `ParticipantData(aux_cols=...)`: auxiliary columns kept for weighting (e.g. day of week, design weights). They are renamed `part_<name>`, are not stratification variables, and keep their missing values.
 - `SocialMix.from_dataframes(aux_cols=..., weight_specs=...)`.
 - `WeightWarning`, a `UserWarning` subclass for weighting messages.
-- `sample_transportation_polytope()` and `check_margins()` in `cntmosaic.predict`: a hit-and-run sampler for the uniform distribution on tables with given row and column sums (optionally symmetric tables). Written in JAX; batches of margins run as independent chains.
+- `sample_hit_run()` and `check_margins()` in `cntmosaic.predict`: a hit-and-run sampler for the uniform distribution on tables with given row and column sums (optionally symmetric tables). Written in JAX; batches of margins run as independent chains.
 - `sample_full_counts()` and `counts_to_intensities()` in `cntmosaic.predict`.
-- `sample_swap()` in `cntmosaic.predict`: a swap-move sampler for the same uniform distribution, which changes four cells per move and runs in sweeps of `R * C` moves. `2 x 2` tables are drawn exactly. `sample_swap_path()` records the chains after given numbers of sweeps, and can continue them.
-- **Assortativity constraints in prediction.** `Predictor.predict_full_matrices(assortativity={...})` fixes the fraction of each stratum's contacts that stay within the stratum, for each age pair (or one value for all). The sampler then draws uniformly from the tables with that diagonal (`sample_transportation_polytope(diagonal=...)`, `diagonal_is_feasible()`). Fractions that are infeasible for a table are moved towards those of the independence table until feasible, with a warning.
+- `sample_swap()` in `cntmosaic.predict`: a swap-move sampler for the same uniform distribution, which changes four cells per move and runs in sweeps of `R * C` moves (default burn-in: 10 sweeps). `2 x 2` tables are drawn exactly. It also samples symmetric tables (`symmetric=True`) and tables with fixed diagonal cells (`diagonal=...`, using three-cycle moves as well). `sample_swap_path()` records the chains after given numbers of sweeps, and can continue them.
+- **Assortativity constraints in prediction.** `Predictor.predict_full_matrices(assortativity={...})` fixes the fraction of each stratum's contacts that stay within the stratum, for each age pair (or one value for all). The sampler then draws uniformly from the tables with that diagonal (`diagonal=...` in `sample_swap()` and `sample_hit_run()`, `diagonal_is_feasible()`). Fractions that are infeasible for a table are moved towards those of the independence table until feasible, with a warning.
 
 ### Changed (breaking)
 
@@ -45,7 +45,8 @@
   - The participants table now includes `dayofweek` and the further POLYMOD participant variables.
   - Tutorial 01 shows the preprocessing.
 - **`Predictor` samples the fully stratified tables directly.** For each posterior draw and age pair, the table of fully stratified contact counts is drawn uniformly from all non-negative tables whose row and column sums match the partially stratified counts, instead of sampling associativity fractions from a truncated Dirichlet distribution.
-  - `predict_full_matrices(key, num_warmup=1600)` and `spectral_radius(key, method=..., num_warmup=1600)` take a JAX PRNG key. The `alpha`, `rng`, `external_eta` and `external_counts` arguments are removed.
+  - The tables are drawn with swap moves by default; `sampler="hit_and_run"` uses the hit-and-run sampler instead.
+  - `predict_full_matrices(key, num_warmup=None, sampler="swap")` and `spectral_radius(key, method=..., num_warmup=None, sampler="swap")` take a JAX PRNG key. `num_warmup` counts sweeps for swap moves (default 10) and steps for hit-and-run (default 1600). The `alpha`, `rng`, `external_eta` and `external_counts` arguments are removed.
   - `get_cache_info()` reports `z_marginals_loaded` instead of `bounds_loaded`.
   - `sample_eta()`, `rtruncated_beta()`, `rtruncated_dirichlet()` and `feasible_mixing_bounds()` are deprecated and no longer used.
 
