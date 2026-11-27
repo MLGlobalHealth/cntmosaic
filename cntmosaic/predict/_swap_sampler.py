@@ -39,7 +39,7 @@ import numpy as np
 from jax import Array
 from jax.typing import ArrayLike
 
-from ._polytope_sampler import _fixed_diagonal, _start, check_margins
+from ._polytope_sampler import _fixed_diagonal, _mirror_upper, _start, check_margins
 
 
 def _sample_two_by_two(
@@ -235,7 +235,8 @@ def _symmetric_sweep(x: Array, key: Array) -> Array:
 
     Each move picks rows ``i != i'`` and columns ``j != j'`` uniformly, as a
     basic swap does, and changes at most eight cells.  A cell and its mirror
-    image receive the same value, so ``x`` stays exactly symmetric.
+    image receive the same value up to rounding; :func:`sample_swap` makes
+    the returned tables exactly symmetric.
     """
     K = x.shape[0]
     num_moves = K * K
@@ -538,7 +539,9 @@ def sample_swap(
         symmetric=symmetric,
         fixed=fixed,
     )
-    return samples.reshape(out_shape) * total[..., None, None]
+    samples = samples.reshape(out_shape) * total[..., None, None]
+    # Exactly symmetric output (see _mirror_upper)
+    return _mirror_upper(samples) if symmetric else samples
 
 
 def sample_swap_path(

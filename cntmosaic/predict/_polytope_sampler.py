@@ -160,12 +160,14 @@ def _mirror_upper(x: Array) -> Array:
     """
     Make ``x`` exactly symmetric by copying its upper triangle onto the lower one.
 
-    Averaging ``(x + x^T) / 2`` is not reliably exact: the compiler may round
-    a cell and its mirror differently when it fuses the averaging with the
-    computation of ``x``.  Copying involves no arithmetic.
+    Works on the last two axes.  Inside a compiled chain the compiler may
+    still compute a cell and its mirror with different rounding, which keeps
+    tables symmetric only up to rounding there.  Applied to tables returned
+    from the compiled chain, it is a plain copy of stored values and makes
+    them exactly symmetric.
     """
-    upper = jnp.triu(jnp.ones(x.shape, dtype=bool))
-    return jnp.where(upper, x, x.T)
+    upper = jnp.triu(jnp.ones(x.shape[-2:], dtype=bool))
+    return jnp.where(upper, x, jnp.swapaxes(x, -1, -2))
 
 
 def _double_center(z: Array, mask: Array) -> Array:
@@ -280,7 +282,7 @@ def _step(
         # The compiled update may round a cell and its mirror differently; restore
         # exact symmetry.  The table was symmetric up to rounding, so the margins
         # change only by rounding error, and every cell stays non-negative.
-        x_new = _mirror_upper(x_new)
+        x_new = _mirror_upper(x_new)  # symmetric up to rounding; exact on output
     if any(fixed):
         # Reset the fixed diagonal to prevent drift from rounding (section A.5.6).
         x_new = jnp.where(jnp.diag(jnp.array(fixed)), x, x_new)
@@ -533,4 +535,6 @@ def sample_hit_run(
         symmetric=symmetric,
         fixed=fixed,
     )
-    return samples.reshape(*batch_shape, num_samples, R, C) * total[..., None, None]
+    samples = samples.reshape(*batch_shape, num_samples, R, C) * total[..., None, None]
+    # Exactly symmetric output (see _mirror_upper)
+    return _mirror_upper(samples) if symmetric else samples
