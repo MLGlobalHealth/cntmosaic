@@ -5,7 +5,13 @@ import pytest
 from scipy import stats
 
 from cntmosaic.predict import sample_swap, sample_swap_path
-from cntmosaic.predict._swap_sampler import _swap_step
+from cntmosaic.predict._swap_sampler import (
+    _cycle_cells,
+    _mirrored,
+    _sparse_step,
+    _swap_cells,
+    _swap_step,
+)
 
 
 class TestSwapStep:
@@ -136,6 +142,43 @@ class TestSampleSwapPath:
             sample_swap_path(jax.random.key(15), self.r, self.c, sweeps=[0], init=jnp.ones((3, 3)))
 
 
+class TestSparseMoves:
+    x = jnp.arange(1.0, 17.0).reshape(4, 4)
+
+    def changed_cells(self, x_new):
+        return {tuple(cell) for cell in np.argwhere(np.asarray(x_new != self.x))}
+
+    def test_swap_changes_its_four_cells(self):
+        cells = _swap_cells(jnp.array(0), jnp.array(1), jnp.array(2), jnp.array(3), self.x.dtype)
+        x = _sparse_step(self.x, *cells, jnp.array(0.3))
+        assert self.changed_cells(x) == {(0, 2), (1, 3), (0, 3), (1, 2)}
+        np.testing.assert_allclose(x.sum(1), self.x.sum(1), rtol=1e-6)
+        np.testing.assert_allclose(x.sum(0), self.x.sum(0), rtol=1e-6)
+
+    def test_three_cycle_changes_its_six_cells(self):
+        cells = _cycle_cells(jnp.array(0), jnp.array(1), jnp.array(2), self.x.dtype)
+        x = _sparse_step(self.x, *cells, jnp.array(0.3))
+        assert self.changed_cells(x) == {(0, 1), (1, 2), (2, 0), (0, 2), (1, 0), (2, 1)}
+        np.testing.assert_array_equal(jnp.diagonal(x), jnp.diagonal(self.x))
+        np.testing.assert_allclose(x.sum(1), self.x.sum(1), rtol=1e-6)
+        np.testing.assert_allclose(x.sum(0), self.x.sum(0), rtol=1e-6)
+
+    def test_mirrored_swap_keeps_symmetry(self):
+        x0 = self.x + self.x.T
+        cells = _mirrored(
+            *_swap_cells(jnp.array(0), jnp.array(1), jnp.array(2), jnp.array(3), x0.dtype)
+        )
+        x = _sparse_step(x0, *cells, jnp.array(0.7))
+        np.testing.assert_array_equal(x, x.T)
+        np.testing.assert_allclose(x.sum(1), x0.sum(1), rtol=1e-6)
+
+    @pytest.mark.parametrize("u", [0.0, 1.0])
+    def test_ends_of_the_interval_empty_a_cell(self, u):
+        cells = _cycle_cells(jnp.array(0), jnp.array(1), jnp.array(2), self.x.dtype)
+        x = _sparse_step(self.x, *cells, jnp.array(u))
+        assert jnp.any(x == 0.0) and jnp.all(x >= 0)
+
+
 class TestSymmetricAndFixedDiagonal:
     r = jnp.array([1.0, 2.0, 3.0, 4.0])
     c = jnp.array([4.0, 3.0, 2.0, 1.0])
@@ -153,39 +196,57 @@ class TestSymmetricAndFixedDiagonal:
     @pytest.mark.parametrize("symmetric", [False, True])
     def test_fixed_diagonal(self, symmetric):
         c = self.r if symmetric else self.c
-        diagonal = jnp.array([0.5, jnp.nan, 1.0, jnp.nan])
+        delta = 1.5 * self.r * c / self.r.sum()  # assortative, strictly feasible
         x = sample_swap(
             jax.random.key(22), self.r, c, num_samples=50,
-            symmetric=symmetric, diagonal=diagonal,
+            symmetric=symmetric, diagonal=delta,
         )
-        np.testing.assert_array_equal(x[:, 0, 0], 0.5)
-        np.testing.assert_array_equal(x[:, 2, 2], 1.0)
+        diag = jnp.diagonal(x, axis1=-2, axis2=-1)
+        np.testing.assert_array_equal(diag, jnp.broadcast_to(diag[0], diag.shape))
+        np.testing.assert_allclose(diag[0], delta, rtol=1e-6)
         np.testing.assert_allclose(x.sum(-1), jnp.broadcast_to(self.r, (50, 4)), rtol=1e-5)
         np.testing.assert_allclose(x.sum(-2), jnp.broadcast_to(c, (50, 4)), rtol=1e-5)
         assert jnp.all(x >= 0)
+        assert not jnp.allclose(x[0], x[-1])  # the chain moved
         if symmetric:
             np.testing.assert_array_equal(x, x.swapaxes(-1, -2))
+
+    def test_partly_fixed_diagonal_raises(self):
+        with pytest.raises(ValueError, match="every diagonal cell to be fixed"):
+            sample_swap(
+                jax.random.key(23), self.r, self.c, num_samples=1,
+                diagonal=jnp.array([0.4, jnp.nan, 0.6, jnp.nan]),
+            )
 
     def test_infeasible_diagonal_raises(self):
         r = jnp.ones(3)
         with pytest.raises(ValueError, match="no strictly positive table"):
             sample_swap(
-                jax.random.key(23), r, r, num_samples=1,
-                diagonal=jnp.array([1.0, 1.0, jnp.nan]),
+                jax.random.key(24), r, r, num_samples=1, diagonal=jnp.array([1.0, 1.0, 0.0])
             )
+
+    def test_symmetric_k3_is_a_single_table(self):
+        r = jnp.array([1.0, 2.0, 3.0])
+        x = sample_swap(
+            jax.random.key(25), r, r, num_samples=5, symmetric=True,
+            diagonal=0.8 * r * r / r.sum(),
+        )
+        np.testing.assert_array_equal(x, jnp.broadcast_to(x[0], x.shape))
+        np.testing.assert_allclose(x[0].sum(-1), r, rtol=1e-5)
 
 
 class TestSampleSwapPathFixedDiagonal:
     r = jnp.array([1.0, 2.0, 3.0, 4.0])
     c = jnp.array([4.0, 3.0, 2.0, 1.0])
-    diagonal = jnp.array([0.5, jnp.nan, 1.0, jnp.nan])
+    delta = 1.5 * r * c / r.sum()
 
     def test_diagonal_fixed_along_the_path(self):
         path = sample_swap_path(
-            jax.random.key(30), self.r, self.c, sweeps=[0, 1, 4, 16], diagonal=self.diagonal
+            jax.random.key(30), self.r, self.c, sweeps=[0, 1, 4, 16], diagonal=self.delta
         )
-        np.testing.assert_array_equal(path[:, 0, 0], 0.5)
-        np.testing.assert_array_equal(path[:, 2, 2], 1.0)
+        diag = jnp.diagonal(path, axis1=-2, axis2=-1)
+        np.testing.assert_array_equal(diag, jnp.broadcast_to(diag[0], diag.shape))
+        np.testing.assert_allclose(diag[0], self.delta, rtol=1e-6)
         np.testing.assert_allclose(path.sum(-1), jnp.broadcast_to(self.r, (4, 4)), rtol=1e-5)
         np.testing.assert_allclose(path.sum(-2), jnp.broadcast_to(self.c, (4, 4)), rtol=1e-5)
         assert jnp.all(path >= 0)
@@ -193,19 +254,19 @@ class TestSampleSwapPathFixedDiagonal:
 
     def test_init_continues_with_the_diagonal(self):
         start = sample_swap_path(
-            jax.random.key(31), self.r, self.c, sweeps=[3], diagonal=self.diagonal
+            jax.random.key(31), self.r, self.c, sweeps=[3], diagonal=self.delta
         )[0]
         path = sample_swap_path(
             jax.random.key(32), self.r, self.c, sweeps=[0, 3], init=start,
-            diagonal=self.diagonal,
+            diagonal=self.delta,
         )
         np.testing.assert_allclose(path[0], start)
-        np.testing.assert_array_equal(path[1, 2, 2], 1.0)
+        np.testing.assert_allclose(jnp.diagonal(path[1]), self.delta, rtol=1e-6)
 
     def test_init_without_the_diagonal_raises(self):
-        init = jnp.outer(self.r, self.c) / self.r.sum()
+        init = jnp.outer(self.r, self.c) / self.r.sum()  # diagonal r c / N, not delta
         with pytest.raises(ValueError, match="fixed diagonal"):
             sample_swap_path(
                 jax.random.key(33), self.r, self.c, sweeps=[0], init=init,
-                diagonal=self.diagonal,
+                diagonal=self.delta,
             )

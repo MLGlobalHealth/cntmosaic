@@ -89,6 +89,7 @@ class TestAssortativity:
     # Age-specific fractions for stratum "a", one common fraction for stratum "c"
     eta = {
         "a": np.random.default_rng(1).uniform(0.3, 0.5, size=(A, A)),
+        "b": 0.35,
         "c": 0.3,
     }
 
@@ -136,7 +137,8 @@ class TestAssortativity:
         eta = np.random.default_rng(2).uniform(0.3, 0.5, size=(S, A, A))
         X = stack_counts(
             sample_full_counts(
-                z_even, jax.random.key(6), num_warmup=5, assortativity={"b": eta},
+                z_even, jax.random.key(6), num_warmup=5,
+                assortativity={"a": 0.3, "b": eta, "c": 0.3},
                 sampler=sampler,
             )
         )
@@ -148,7 +150,8 @@ class TestAssortativity:
     def test_infeasible_fractions_are_shrunk(self, z_marg, sampler):
         with pytest.warns(UserWarning, match="infeasible for"):
             counts = sample_full_counts(
-                z_marg, jax.random.key(3), num_warmup=5, assortativity={"a": 0.99},
+                z_marg, jax.random.key(3), num_warmup=5,
+                assortativity={"a": 0.99, "b": 0.3, "c": 0.3},
                 sampler=sampler,
             )
         X = stack_counts(counts)
@@ -171,6 +174,22 @@ class TestAssortativity:
         with pytest.raises(ValueError, match=match):
             sample_full_counts(
                 z_marg, jax.random.key(4), num_warmup=1, assortativity=assortativity
+            )
+
+    def test_partial_assortativity(self, z_even):
+        # Hit-and-run supports a partly fixed diagonal; swap moves need every stratum.
+        counts = sample_full_counts(
+            z_even, jax.random.key(8), num_warmup=5, assortativity={"a": 0.4},
+            sampler="hit_and_run",
+        )
+        a, b = np.tril_indices(A)
+        np.testing.assert_allclose(
+            counts["a->a"][:, a, b], 0.4 * z_even["a"][:, a, b], rtol=1e-5
+        )
+        with pytest.raises(ValueError, match="missing"):
+            sample_full_counts(
+                z_even, jax.random.key(8), num_warmup=5, assortativity={"a": 0.4},
+                sampler="swap",
             )
 
     def test_two_strata_allow_one_fraction(self):

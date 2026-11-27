@@ -292,7 +292,7 @@ def _quasi_independence(
     col_res: Array,
     free: Array,
     symmetric: bool,
-    max_sweeps: int = 1000,
+    max_sweeps: int = 10_000,
 ) -> Array:
     """
     Quasi-independence table on the free cells, by iterative proportional fitting.
@@ -300,7 +300,8 @@ def _quasi_independence(
     Returns the non-negative table with margins ``(row_res, col_res)``, zeros
     outside ``free`` and every free cell strictly positive (equation A.18).
     Fitting stops once every row sum is within rounding error of ``row_res``,
-    relative to that row sum.
+    relative to that row sum.  Near the boundary of the feasible diagonals
+    fitting converges slowly, hence the generous limit on the number of sweeps.
     """
     rtol = 100 * jnp.finfo(row_res.dtype).eps
 

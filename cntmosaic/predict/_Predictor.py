@@ -141,8 +141,10 @@ class Predictor:
             ``[0, 1]``: a scalar, an ``(A, A)`` array indexed by respondent
             age and contact age, or an ``(S, A, A)`` array per posterior
             draw.  Only entries with respondent age ``a >= b`` are used.
-            Strata that are left out are not constrained.  With two strata at
-            most one can be given, and it then determines the table.
+            With ``sampler="swap"`` every stratum needs a fraction.  With
+            ``sampler="hit_and_run"`` strata that are left out are not
+            constrained, and with two strata at most one can be given, which
+            then determines the table.
         sampler : {"swap", "hit_and_run"}, optional
             Sampler for the tables (default ``"swap"``).
 

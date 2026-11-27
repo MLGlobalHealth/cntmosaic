@@ -367,8 +367,10 @@ def sample_full_counts(
         ``[0, 1]``: a scalar (common to all age pairs), an ``(A, A)`` array
         indexed by respondent age and contact age, or an ``(S, A, A)`` array
         per posterior draw.  Only entries with respondent age ``a >= b`` are
-        used.  Strata that are left out are not constrained.  With two strata
-        at most one can be given.
+        used.  With ``sampler="swap"`` every stratum needs a fraction, since
+        the swap sampler fixes the whole diagonal.  With
+        ``sampler="hit_and_run"`` strata that are left out are not
+        constrained, and with two strata at most one can be given.
     sampler : {"swap", "hit_and_run"}, optional
         Sampler for the tables (default ``"swap"``).
 
@@ -414,6 +416,13 @@ def sample_full_counts(
     fixed_off = fixed_diag = None
     if assortativity:
         eta, fixed = _assortativity_array(assortativity, strata, (S, A, A))
+        if sampler == "swap" and not fixed.all():
+            missing = [k for k, f in zip(strata, fixed) if not f]
+            raise ValueError(
+                "The swap sampler fixes the whole diagonal, so every stratum "
+                f"needs an assortativity fraction; missing: {missing}. Give all "
+                "strata, or use sampler='hit_and_run' for a partly fixed diagonal."
+            )
         fixed_off, adjusted_off, change_off = _assortative_diagonal(
             np.moveaxis(eta[:, :, a, b], 1, -1), fixed, row_sums, col_sums
         )

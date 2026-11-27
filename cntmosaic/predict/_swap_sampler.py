@@ -14,10 +14,12 @@ distribution.
 For ``2 x 2`` tables a single cell determines the whole table, and the tables
 are drawn exactly and independently instead.
 
-Symmetric tables use each swap together with its mirror image.  When some
-diagonal cells are fixed (section B of the supplement), moves that would
-change them are skipped, and three-cycle moves, which leave the diagonal
-unchanged, are proposed as well.
+Symmetric tables use each swap together with its mirror image.  When the
+whole diagonal is fixed (section B of the supplement, Algorithm 2), each move
+is either a basic swap on four distinct strata or a three-cycle on three
+distinct strata; neither touches the diagonal.  Every move reads and writes
+only the cells it changes: four for a swap, six for a three-cycle, and eight
+for a mirrored swap.
 
 References
 ----------
@@ -37,14 +39,7 @@ import numpy as np
 from jax import Array
 from jax.typing import ArrayLike
 
-from ._polytope_sampler import (
-    _chord,
-    _fixed_diagonal,
-    _mirror_upper,
-    _start,
-    check_margins,
-    independence_table,
-)
+from ._polytope_sampler import _fixed_diagonal, _start, check_margins
 
 
 def _sample_two_by_two(
@@ -85,20 +80,6 @@ def _sample_two_by_two(
     first_row = jnp.stack([x, r1 - x], axis=-1)
     second_row = jnp.stack([c1 - x, r2 - c1 + x], axis=-1)
     return jnp.stack([first_row, second_row], axis=-2)
-
-
-def _two_by_two_fixed(row_sums: Array, col_sums: Array, delta: Array, fixed) -> Array:
-    """
-    The single ``2 x 2`` table with one fixed diagonal cell.
-
-    Fixing ``x_11`` or ``x_22`` determines the whole table:
-    ``x_11 = delta_1``, or ``x_11 = r_1 - c_2 + delta_2``.
-    """
-    r1, r2, c1 = row_sums[..., 0], row_sums[..., 1], col_sums[..., 0]
-    x = delta[..., 0] if fixed[0] else r1 - col_sums[..., 1] + delta[..., 1]
-    return jnp.stack(
-        [jnp.stack([x, r1 - x], -1), jnp.stack([c1 - x, r2 - c1 + x], -1)], -2
-    )
 
 
 def _swap_step(
@@ -170,101 +151,158 @@ def _sweep(x: Array, key: Array) -> Array:
 
 
 # ----------------------------------------------------------------------
-# General moves: symmetric tables and fixed diagonal cells (section B)
+# Moves on a few cells: symmetric tables and a fixed diagonal (section B)
 # ----------------------------------------------------------------------
 
 
-def _move_direction(
-    shape: Tuple[int, int],
-    rows: Tuple[Array, Array],
-    cols: Tuple[Array, Array],
-    triple: Array,
-    use_cycle: Array,
-    symmetric: bool,
-) -> Array:
+def _sparse_step(x: Array, rows: Array, cols: Array, coefs: Array, u: Array) -> Array:
     """
-    Direction of one move as a dense ``K x K`` array.
+    Move ``x`` along a direction given by a few cells, reading only those cells.
 
-    Either the basic swap ``D^(i,i';j,j')`` (A.5) or, if ``use_cycle``, the
-    three-cycle ``D^(i,j,k)`` (B.5), which moves mass around ``i -> j -> k -> i``
-    without touching the diagonal.  For symmetric tables the direction is
-    ``D + D^T``, which keeps zero row and column sums and keeps the table
-    symmetric.
+    The direction adds ``coefs[e]`` to cell ``(rows[e], cols[e])``.  A cell may
+    appear in several entries (a symmetric swap whose rows and columns
+    overlap), so each entry first takes the total coefficient of its cell.
+    The step ``t`` is uniform on the interval that keeps the cells
+    non-negative, and every entry's cell is set to ``x + t * total``.  The
+    totals are 0, +-1 or +-2, so a step to an end of the interval sets that
+    cell to zero exactly.
+
+    Parameters
+    ----------
+    x : Array
+        Table of shape ``(R, C)``.
+    rows, cols, coefs : Array
+        Cells and coefficients of the direction, each of shape ``(m,)``.
+    u : Array
+        A number in ``[0, 1]`` that sets the position of ``t`` in its interval.
+
+    Returns
+    -------
+    Array
+        The updated table.
     """
-    (i, i2), (j, j2) = rows, cols
-    a, b, c = triple
-    zeros = jnp.zeros(shape)
-    swap = zeros.at[i, j].add(1).at[i2, j2].add(1).at[i, j2].add(-1).at[i2, j].add(-1)
-    cycle = (
-        zeros.at[a, b].add(1).at[b, c].add(1).at[c, a].add(1)
-        .at[a, c].add(-1).at[b, a].add(-1).at[c, b].add(-1)
-    )
-    d = jnp.where(use_cycle, cycle, swap)
-    return d + d.T if symmetric else d
+    same_cell = (rows[:, None] == rows[None, :]) & (cols[:, None] == cols[None, :])
+    total = (same_cell * coefs[None, :]).sum(axis=1)
+    values = x[rows, cols]
 
-
-def _move_step(
-    x: Array, d: Array, u: Array, delta: Array, fixed_cells: Array, symmetric: bool
-) -> Array:
-    """
-    Move ``x`` along ``d`` by a uniform step on the chord ``{t : x + t d >= 0}``.
-
-    A move that would change a fixed diagonal cell is not admissible (B.4) and
-    is skipped.  The entries of ``d`` are 0, +-1 or +-2, so a step to an end
-    of the chord sets that cell to zero exactly.  After the step, symmetric
-    tables are made exactly symmetric and fixed diagonal cells are reset to ``delta``
-    against rounding.
-    """
-    d = jnp.where(jnp.any((d != 0) & fixed_cells), 0.0, d)
-    t_lo, t_hi = _chord(x, d)
+    ratio = -values / jnp.where(total == 0, 1.0, total)
+    t_lo = jnp.max(jnp.where(total > 0, ratio, -jnp.inf))
+    t_hi = jnp.min(jnp.where(total < 0, ratio, jnp.inf))
     t = jnp.clip(t_lo + u * (t_hi - t_lo), t_lo, t_hi)
-    # If the move is skipped then d = 0 and the chord is unbounded.
-    x = x + jnp.where(jnp.isfinite(t), t, 0.0) * d
-    if symmetric:
-        x = _mirror_upper(x)
-    return jnp.where(fixed_cells, jnp.diag(delta), x)
+    # If every coefficient cancels, the interval is unbounded and nothing moves.
+    t = jnp.where(jnp.isfinite(t), t, 0.0)
+    return x.at[rows, cols].set(values + t * total)
 
 
-def _cycle_probability(K: int, symmetric: bool, fixed: Tuple[bool, ...]) -> float:
+def _swap_cells(i, i2, j, j2, dtype, pad: int = 0) -> Tuple[Array, Array, Array]:
     """
-    Probability of proposing a three-cycle instead of a basic swap.
+    Cells of the basic swap ``D^(i,i';j,j')`` (A.5): ``+1`` on ``(i, j)`` and
+    ``(i', j')``, ``-1`` on ``(i, j')`` and ``(i', j)``.
 
-    Symmetrised three-cycles are zero, so symmetric tables use swaps only.
-    With the whole diagonal fixed and ``K = 3``, no basic swap is admissible.
-    Otherwise both move types are proposed when some diagonal cell is fixed.
+    ``pad`` extra entries with coefficient 0 on cell ``(i, j)`` give the swap
+    the same length as a three-cycle; they change nothing.
     """
-    if symmetric or not any(fixed):
-        return 0.0
-    if K == 3 and all(fixed):
-        return 1.0
-    return 0.5
+    rows = jnp.stack([i, i2, i, i2] + [i] * pad)
+    cols = jnp.stack([j, j2, j2, j] + [j] * pad)
+    coefs = jnp.array([1, 1, -1, -1] + [0] * pad, dtype=dtype)
+    return rows, cols, coefs
 
 
-def _general_sweep(
-    x: Array, key: Array, delta: Array, symmetric: bool, fixed: Tuple[bool, ...]
-) -> Array:
-    """Apply ``K * K`` general moves (Algorithm 2 of the supplement) to ``x``."""
+def _cycle_cells(i, j, k, dtype) -> Tuple[Array, Array, Array]:
+    """
+    Cells of the three-cycle ``D^(i,j,k)`` (B.5): ``+1`` on ``(i, j)``,
+    ``(j, k)`` and ``(k, i)``, ``-1`` on ``(i, k)``, ``(j, i)`` and ``(k, j)``.
+    It moves mass around ``i -> j -> k -> i`` without touching the diagonal.
+    """
+    rows = jnp.stack([i, j, k, i, j, k])
+    cols = jnp.stack([j, k, i, k, i, j])
+    coefs = jnp.array([1, 1, 1, -1, -1, -1], dtype=dtype)
+    return rows, cols, coefs
+
+
+def _mirrored(rows: Array, cols: Array, coefs: Array) -> Tuple[Array, Array, Array]:
+    """Cells of ``D + D^T``: each cell together with its mirror image."""
+    return (
+        jnp.concatenate([rows, cols]),
+        jnp.concatenate([cols, rows]),
+        jnp.concatenate([coefs, coefs]),
+    )
+
+
+def _symmetric_sweep(x: Array, key: Array) -> Array:
+    """
+    Apply ``K * K`` symmetric swap moves ``D + D^T`` to the symmetric table ``x``.
+
+    Each move picks rows ``i != i'`` and columns ``j != j'`` uniformly, as a
+    basic swap does, and changes at most eight cells.  A cell and its mirror
+    image receive the same value, so ``x`` stays exactly symmetric.
+    """
     K = x.shape[0]
     num_moves = K * K
-    p = _cycle_probability(K, symmetric, fixed)
-    fixed_cells = jnp.diag(jnp.array(fixed)) if any(fixed) else jnp.zeros((K, K), bool)
-
-    key_rows, key_cols, key_triples, key_cycle, key_u = jax.random.split(key, 5)
+    key_rows, key_cols, key_u = jax.random.split(key, 3)
     i, i2 = _distinct_pairs(key_rows, K, num_moves)
     j, j2 = _distinct_pairs(key_cols, K, num_moves)
-    triples = jax.vmap(lambda k: jax.random.choice(k, K, (3,), replace=False))(
-        jax.random.split(key_triples, num_moves)
-    )
-    use_cycle = jax.random.uniform(key_cycle, (num_moves,)) < p
     u = jax.random.uniform(key_u, (num_moves,), dtype=x.dtype)
 
     def move(s, x):
-        d = _move_direction(
-            x.shape, (i[s], i2[s]), (j[s], j2[s]), triples[s], use_cycle[s], symmetric
-        )
-        return _move_step(x, d, u[s], delta, fixed_cells, symmetric)
+        cells = _mirrored(*_swap_cells(i[s], i2[s], j[s], j2[s], x.dtype))
+        return _sparse_step(x, *cells, u[s])
 
     return jax.lax.fori_loop(0, num_moves, move, x)
+
+
+def _fixed_diagonal_sweep(x: Array, key: Array, symmetric: bool) -> Array:
+    """
+    Apply ``K * K`` moves of Algorithm 2 to ``x``, whose whole diagonal is fixed.
+
+    Each move draws distinct strata uniformly.  With probability ``p`` it is a
+    three-cycle on three of them, otherwise a basic swap with two of them as
+    rows and the other two as columns.  Neither touches the diagonal, so both
+    are always admissible and the diagonal keeps its exact values.  ``p = 1``
+    for ``K = 3``, where no basic swap exists, and ``p = 1/2`` otherwise.
+
+    For symmetric tables each swap is applied with its mirror image, and
+    three-cycles are not used because ``D + D^T`` vanishes for them.  With
+    ``K = 3`` no symmetric move exists: the only table is the start.
+    """
+    K = x.shape[0]
+    if symmetric and K == 3:
+        return x
+
+    num_moves = K * K
+    num_strata = 3 if K == 3 else 4
+    key_strata, key_cycle, key_u = jax.random.split(key, 3)
+    strata = jax.vmap(lambda k: jax.random.choice(k, K, (num_strata,), replace=False))(
+        jax.random.split(key_strata, num_moves)
+    )
+    u = jax.random.uniform(key_u, (num_moves,), dtype=x.dtype)
+    p = 0.0 if symmetric else (1.0 if K == 3 else 0.5)
+    use_cycle = jax.random.uniform(key_cycle, (num_moves,)) < p
+
+    def cells(s):
+        a = strata[s]
+        cycle = _cycle_cells(a[0], a[1], a[2], x.dtype)
+        if K == 3:
+            return cycle
+        swap = _swap_cells(a[0], a[1], a[2], a[3], x.dtype, pad=2)
+        if symmetric:
+            return _mirrored(*_swap_cells(a[0], a[1], a[2], a[3], x.dtype))
+        # Select the move entry by entry, so that only six cells are touched.
+        return tuple(jnp.where(use_cycle[s], c, w) for c, w in zip(cycle, swap))
+
+    def move(s, x):
+        return _sparse_step(x, *cells(s), u[s])
+
+    return jax.lax.fori_loop(0, num_moves, move, x)
+
+
+def _sweep_function(symmetric: bool, fixed: Tuple[bool, ...]):
+    """The sweep of the plain, symmetric or fixed-diagonal sampler."""
+    if any(fixed):
+        return partial(_fixed_diagonal_sweep, symmetric=symmetric)
+    if symmetric:
+        return _symmetric_sweep
+    return _sweep
 
 
 # ----------------------------------------------------------------------
@@ -286,18 +324,13 @@ def _run_chain(
     """
     Run one chain; returns ``(num_samples, R, C)``.
 
-    Without symmetry or fixed cells the chain uses basic swaps from the
-    independence table (Algorithm 1).  Otherwise it uses the general moves
-    from the quasi-independence table (Algorithm 2).
+    Without symmetry or a fixed diagonal the chain uses basic swaps from the
+    independence table (Algorithm 1).  With a fixed diagonal it uses the
+    moves of Algorithm 2 from ``diag(delta)`` plus the quasi-independence
+    table of the other cells.
     """
-    if symmetric or any(fixed):
-        x0 = _start(row_sums, col_sums, delta, symmetric, fixed)
-
-        def sweep(x, key):
-            return _general_sweep(x, key, delta, symmetric, fixed)
-
-    else:
-        x0, sweep = independence_table(row_sums, col_sums), _sweep
+    x0 = _start(row_sums, col_sums, delta, symmetric, fixed)
+    sweep = _sweep_function(symmetric, fixed)
 
     def advance(x, key, num_sweeps):
         def body(s, x):
@@ -346,13 +379,7 @@ def _run_path(
     diagonal cells are fixed.  Returns tables of shape ``(len(gaps), R, C)``;
     entry ``k`` is the table after ``gaps[0] + ... + gaps[k]`` sweeps.
     """
-    if any(fixed):
-
-        def sweep(x, key):
-            return _general_sweep(x, key, delta, False, fixed)
-
-    else:
-        sweep = _sweep
+    sweep = _sweep_function(False, fixed)
 
     def record(x, inputs):
         key, gap = inputs
@@ -371,6 +398,15 @@ def _run_path(
 def _run_paths(keys, init, delta, gaps, fixed):
     run = partial(_run_path, fixed=fixed)
     return jax.vmap(run, in_axes=(0, 0, 0, None))(keys, init, delta, gaps)
+
+
+def _check_fully_fixed(fixed: Tuple[bool, ...]) -> None:
+    """The swap sampler with a fixed diagonal (Algorithm 2) needs every cell fixed."""
+    if not all(fixed):
+        raise ValueError(
+            "The swap sampler requires every diagonal cell to be fixed; "
+            "use sample_hit_run for a partly fixed diagonal."
+        )
 
 
 def _independence_tables(row_sums: Array, col_sums: Array) -> Array:
@@ -408,11 +444,12 @@ def sample_swap(
     With ``symmetric=True`` the chain samples uniformly from the symmetric
     tables in ``T(r, r)``: each move is a swap plus its mirror image.  With
     ``diagonal`` the chain samples uniformly from the tables whose diagonal
-    cells ``x_kk`` equal the given values for every ``k`` in a set ``S``
-    (Algorithm 2 of the supplement).  It then proposes basic swaps and
-    three-cycle moves, skips any move that would change a fixed cell, and
-    starts at ``diag(delta)`` plus the quasi-independence table of the
-    remaining cells.  Both options can be combined.
+    cells ``x_kk`` all equal the given values (Algorithm 2 of the
+    supplement).  Each move is then a three-cycle on three distinct strata
+    (with probability 1/2, or always when ``K = 3``) or a basic swap on four
+    distinct strata, and the chain starts at ``diag(delta)`` plus the
+    quasi-independence table of the off-diagonal cells.  Both options can be
+    combined; symmetric tables then use mirrored swaps only.
 
     The chain runs on the margins divided by their total ``N`` and the sampled
     tables are multiplied by ``N``, so the result does not depend on the
@@ -443,9 +480,9 @@ def sample_swap(
         ``row_sums == col_sums``.
     diagonal : ArrayLike or None, optional
         Fixed diagonal values ``delta`` of shape ``(..., K)``, or ``(K,)`` for
-        the whole batch; ``NaN`` marks a free diagonal cell.  The same cells
-        must be fixed in every table, and every table must pass
-        :func:`diagonal_is_feasible`.  Requires square tables.
+        the whole batch.  Every diagonal cell must be fixed (no ``NaN``; use
+        :func:`sample_hit_run` for a partly fixed diagonal), and every table
+        must pass :func:`diagonal_is_feasible`.  Requires square tables.
 
     Returns
     -------
@@ -475,6 +512,7 @@ def sample_swap(
         delta, fixed = jnp.zeros_like(r), ()
     else:
         delta, fixed = _fixed_diagonal(r, c, diagonal)
+        _check_fully_fixed(fixed)
 
     batch_shape, (R, C) = r.shape[:-1], (r.shape[-1], c.shape[-1])
     out_shape = (*batch_shape, num_samples, R, C)
@@ -483,9 +521,6 @@ def sample_swap(
         x0 = _independence_tables(r, c)
         return jnp.broadcast_to(x0[..., None, :, :], out_shape)
     if R == C == 2:
-        if any(fixed):
-            x = _two_by_two_fixed(r, c, delta, fixed)
-            return jnp.broadcast_to(x[..., None, :, :], out_shape)
         # With r = c every 2 x 2 table is symmetric, so this also covers symmetric.
         return _sample_two_by_two(key, r, c, num_samples)
 
@@ -545,7 +580,7 @@ def sample_swap_path(
         ``diag(delta)`` plus the quasi-independence table of the other cells.
     diagonal : ArrayLike or None, optional
         Fixed diagonal values of shape ``(..., K)``, or ``(K,)`` for the whole
-        batch; ``NaN`` marks a free diagonal cell (see :func:`sample_swap`).
+        batch.  Every diagonal cell must be fixed (see :func:`sample_swap`).
 
     Returns
     -------
@@ -579,6 +614,7 @@ def sample_swap_path(
         delta, fixed = jnp.zeros_like(r), ()
     else:
         delta, fixed = _fixed_diagonal(r, c, diagonal)
+        _check_fully_fixed(fixed)
     batch_shape, (R, C) = r.shape[:-1], (r.shape[-1], c.shape[-1])
     out_shape = (*batch_shape, sweeps.size, R, C)
     fixed_cells = jnp.diag(jnp.array(fixed)) if any(fixed) else None
@@ -611,10 +647,6 @@ def sample_swap_path(
     if R == 1 or C == 1:
         return jnp.broadcast_to(x0[..., None, :, :], out_shape)
     if R == C == 2:
-        if any(fixed):
-            # The fixed cell determines the table.
-            x = _two_by_two_fixed(r, c, delta, fixed)
-            return jnp.broadcast_to(x[..., None, :, :], out_shape)
         draws = _sample_two_by_two(key, r, c, sweeps.size)
         not_moved = jnp.asarray(sweeps == 0)[:, None, None]
         return jnp.where(not_moved, x0[..., None, :, :], draws)
