@@ -6,11 +6,10 @@ from scipy import stats
 
 from cntmosaic.predict import sample_swap, sample_swap_path
 from cntmosaic.predict._swap_sampler import (
-    _cycle_cells,
-    _mirrored,
-    _sparse_step,
-    _swap_cells,
+    _distinct_strata,
     _swap_step,
+    _symmetric_fixed_step,
+    _symmetric_swap_step,
 )
 
 
@@ -142,41 +141,42 @@ class TestSampleSwapPath:
             sample_swap_path(jax.random.key(15), self.r, self.c, sweeps=[0], init=jnp.ones((3, 3)))
 
 
-class TestSparseMoves:
+class TestMoves:
     x = jnp.arange(1.0, 17.0).reshape(4, 4)
+    sym = x + x.T
 
-    def changed_cells(self, x_new):
-        return {tuple(cell) for cell in np.argwhere(np.asarray(x_new != self.x))}
+    @staticmethod
+    def changed(x_new, x_old):
+        return {tuple(cell) for cell in np.argwhere(np.asarray(x_new != x_old))}
 
-    def test_swap_changes_its_four_cells(self):
-        cells = _swap_cells(jnp.array(0), jnp.array(1), jnp.array(2), jnp.array(3), self.x.dtype)
-        x = _sparse_step(self.x, *cells, jnp.array(0.3))
-        assert self.changed_cells(x) == {(0, 2), (1, 3), (0, 3), (1, 2)}
-        np.testing.assert_allclose(x.sum(1), self.x.sum(1), rtol=1e-6)
-        np.testing.assert_allclose(x.sum(0), self.x.sum(0), rtol=1e-6)
-
-    def test_three_cycle_changes_its_six_cells(self):
-        cells = _cycle_cells(jnp.array(0), jnp.array(1), jnp.array(2), self.x.dtype)
-        x = _sparse_step(self.x, *cells, jnp.array(0.3))
-        assert self.changed_cells(x) == {(0, 1), (1, 2), (2, 0), (0, 2), (1, 0), (2, 1)}
-        np.testing.assert_array_equal(jnp.diagonal(x), jnp.diagonal(self.x))
-        np.testing.assert_allclose(x.sum(1), self.x.sum(1), rtol=1e-6)
-        np.testing.assert_allclose(x.sum(0), self.x.sum(0), rtol=1e-6)
-
-    def test_mirrored_swap_keeps_symmetry(self):
-        x0 = self.x + self.x.T
-        cells = _mirrored(
-            *_swap_cells(jnp.array(0), jnp.array(1), jnp.array(2), jnp.array(3), x0.dtype)
-        )
-        x = _sparse_step(x0, *cells, jnp.array(0.7))
+    def test_symmetric_swap_changes_four_cells(self):
+        x = _symmetric_swap_step(self.sym, jnp.array(0), jnp.array(2), jnp.array(0.3))
+        assert self.changed(x, self.sym) == {(0, 0), (2, 2), (0, 2), (2, 0)}
         np.testing.assert_array_equal(x, x.T)
-        np.testing.assert_allclose(x.sum(1), x0.sum(1), rtol=1e-6)
+        np.testing.assert_allclose(x.sum(1), self.sym.sum(1), rtol=1e-6)
 
-    @pytest.mark.parametrize("u", [0.0, 1.0])
-    def test_ends_of_the_interval_empty_a_cell(self, u):
-        cells = _cycle_cells(jnp.array(0), jnp.array(1), jnp.array(2), self.x.dtype)
-        x = _sparse_step(self.x, *cells, jnp.array(u))
-        assert jnp.any(x == 0.0) and jnp.all(x >= 0)
+    @pytest.mark.parametrize("u, emptied", [(0.0, (0, 0)), (1.0, (0, 2))])
+    def test_symmetric_swap_ends_empty_a_cell(self, u, emptied):
+        # t_- = -min(x_00, x_22) = -x_00 empties (0, 0); t_+ = x_02 empties (0, 2).
+        x = _symmetric_swap_step(self.sym, jnp.array(0), jnp.array(2), jnp.array(u))
+        assert x[emptied] == 0.0 and jnp.all(x >= 0)
+
+    def test_symmetric_fixed_step_changes_eight_cells(self):
+        i, j, k, l = (jnp.array(v) for v in (0, 1, 2, 3))
+        x = _symmetric_fixed_step(self.sym, i, j, k, l, jnp.array(0.4))
+        pairs = {(0, 1), (2, 3), (0, 3), (2, 1)}
+        assert self.changed(x, self.sym) == pairs | {(b, a) for a, b in pairs}
+        np.testing.assert_array_equal(jnp.diagonal(x), jnp.diagonal(self.sym))
+        np.testing.assert_array_equal(x, x.T)
+        np.testing.assert_allclose(x.sum(1), self.sym.sum(1), rtol=1e-6)
+
+    def test_distinct_strata(self):
+        strata = np.asarray(_distinct_strata(jax.random.key(0), 5, 2000, 4))
+        assert strata.min() >= 0 and strata.max() < 5
+        assert all(len(set(row)) == 4 for row in strata)
+        # Each stratum appears in each position about equally often.
+        counts = np.stack([np.bincount(strata[:, m], minlength=5) for m in range(4)])
+        np.testing.assert_allclose(counts / 2000, 0.2, atol=0.04)
 
 
 class TestSymmetricAndFixedDiagonal:
@@ -188,33 +188,65 @@ class TestSymmetricAndFixedDiagonal:
         np.testing.assert_array_equal(x, x.swapaxes(-1, -2))
         np.testing.assert_allclose(x.sum(-1), jnp.broadcast_to(self.r, (50, 4)), rtol=1e-5)
         assert jnp.all(x >= 0)
+        assert not jnp.allclose(x[0], x[-1])
 
     def test_symmetric_requires_equal_margins(self):
         with pytest.raises(ValueError, match="equal row and column sums"):
             sample_swap(jax.random.key(21), self.r, self.c, num_samples=1, symmetric=True)
 
+    @pytest.mark.parametrize("K", [3, 4, 5])
     @pytest.mark.parametrize("symmetric", [False, True])
-    def test_fixed_diagonal(self, symmetric):
-        c = self.r if symmetric else self.c
-        delta = 1.5 * self.r * c / self.r.sum()  # assortative, strictly feasible
+    def test_fixed_diagonal(self, K, symmetric):
+        r = jnp.arange(1.0, K + 1)
+        c = r if symmetric else r[::-1]
+        delta = 1.5 * r * c / r.sum()  # assortative, strictly feasible
         x = sample_swap(
-            jax.random.key(22), self.r, c, num_samples=50,
-            symmetric=symmetric, diagonal=delta,
+            jax.random.key(22), r, c, num_samples=50, symmetric=symmetric, diagonal=delta
         )
         diag = jnp.diagonal(x, axis1=-2, axis2=-1)
         np.testing.assert_array_equal(diag, jnp.broadcast_to(diag[0], diag.shape))
-        np.testing.assert_allclose(diag[0], delta, rtol=1e-6)
-        np.testing.assert_allclose(x.sum(-1), jnp.broadcast_to(self.r, (50, 4)), rtol=1e-5)
-        np.testing.assert_allclose(x.sum(-2), jnp.broadcast_to(c, (50, 4)), rtol=1e-5)
+        np.testing.assert_allclose(diag[0], delta, rtol=1e-5)
+        np.testing.assert_allclose(x.sum(-1), jnp.broadcast_to(r, (50, K)), rtol=1e-5)
+        np.testing.assert_allclose(x.sum(-2), jnp.broadcast_to(c, (50, K)), rtol=1e-5)
         assert jnp.all(x >= 0)
-        assert not jnp.allclose(x[0], x[-1])  # the chain moved
         if symmetric:
             np.testing.assert_array_equal(x, x.swapaxes(-1, -2))
+        if not (symmetric and K == 3):  # a symmetric 3 x 3 table is determined
+            assert not jnp.allclose(x[0], x[-1])
+
+    def test_three_strata_lie_on_a_segment(self):
+        r = jnp.array([1.0, 2.0, 3.0])
+        c = jnp.array([3.0, 2.0, 1.0])
+        x = sample_swap(jax.random.key(23), r, c, num_samples=200, diagonal=0.8 * r * c / 6)
+        cycle = jnp.array([[0.0, 1.0, -1.0], [-1.0, 0.0, 1.0], [1.0, -1.0, 0.0]])
+        t = x[:, 0, 1] - x[0, 0, 1]
+        np.testing.assert_allclose(x, x[0] + t[:, None, None] * cycle, atol=1e-5)
+
+    def test_symmetric_three_strata_closed_form(self):
+        r = jnp.array([1.0, 2.0, 3.0])
+        delta = 0.8 * r * r / r.sum()
+        x = sample_swap(
+            jax.random.key(24), r, r, num_samples=3, symmetric=True, diagonal=delta
+        )
+        rr = r - delta
+        np.testing.assert_allclose(x[0, 0, 1], (rr[0] + rr[1] - rr[2]) / 2, rtol=1e-5)
+        np.testing.assert_allclose(x[0, 1, 2], (rr[1] + rr[2] - rr[0]) / 2, rtol=1e-5)
+        np.testing.assert_array_equal(x, jnp.broadcast_to(x[0], x.shape))
+
+    @pytest.mark.parametrize("symmetric", [False, True])
+    def test_two_by_two_diagonal_raises(self, symmetric):
+        r = jnp.array([3.0, 1.0])
+        c = r if symmetric else jnp.array([2.0, 2.0])
+        with pytest.raises(ValueError, match="only one diagonal cell"):
+            sample_swap(
+                jax.random.key(25), r, c, num_samples=1, symmetric=symmetric,
+                diagonal=jnp.array([1.0, 0.5]),
+            )
 
     def test_partly_fixed_diagonal_raises(self):
         with pytest.raises(ValueError, match="every diagonal cell to be fixed"):
             sample_swap(
-                jax.random.key(23), self.r, self.c, num_samples=1,
+                jax.random.key(26), self.r, self.c, num_samples=1,
                 diagonal=jnp.array([0.4, jnp.nan, 0.6, jnp.nan]),
             )
 
@@ -222,17 +254,8 @@ class TestSymmetricAndFixedDiagonal:
         r = jnp.ones(3)
         with pytest.raises(ValueError, match="no strictly positive table"):
             sample_swap(
-                jax.random.key(24), r, r, num_samples=1, diagonal=jnp.array([1.0, 1.0, 0.0])
+                jax.random.key(27), r, r, num_samples=1, diagonal=jnp.array([1.0, 1.0, 0.0])
             )
-
-    def test_symmetric_k3_is_a_single_table(self):
-        r = jnp.array([1.0, 2.0, 3.0])
-        x = sample_swap(
-            jax.random.key(25), r, r, num_samples=5, symmetric=True,
-            diagonal=0.8 * r * r / r.sum(),
-        )
-        np.testing.assert_array_equal(x, jnp.broadcast_to(x[0], x.shape))
-        np.testing.assert_allclose(x[0].sum(-1), r, rtol=1e-5)
 
 
 class TestSampleSwapPathFixedDiagonal:
