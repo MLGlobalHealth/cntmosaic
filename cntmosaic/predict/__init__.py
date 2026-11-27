@@ -2,7 +2,7 @@ from ._Predictor import Predictor
 from ._polytope_sampler import (
     check_margins,
     diagonal_is_feasible,
-    sample_transportation_polytope,
+    sample_hit_run,
 )
 from ._swap_sampler import sample_swap, sample_swap_path
 from ._predict import (
@@ -27,9 +27,9 @@ __all__ = [
     "rtruncated_dirichlet",
     "sample_eta",
     "sample_full_counts",
+    "sample_hit_run",
     "sample_swap",
     "sample_swap_path",
-    "sample_transportation_polytope",
     "spectral_radius",
     "z_marginals",
 ]

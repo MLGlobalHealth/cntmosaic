@@ -12,7 +12,8 @@ from numpy.typing import ArrayLike, NDArray
 
 from ..dataloader import ContactSurveyLoader
 from ..analysis import ModelSummariser
-from ._polytope_sampler import sample_transportation_polytope
+from ._polytope_sampler import sample_hit_run
+from ._swap_sampler import sample_swap
 
 
 def _compute_P_sa(dataloader: ContactSurveyLoader) -> Dict[str, np.ndarray]:
@@ -265,7 +266,7 @@ def _assortative_diagonal(
     -------
     Tuple[NDArray, NDArray, float]
         The diagonal with ``NaN`` for free strata (the format expected by
-        :func:`sample_transportation_polytope`), a boolean array marking the
+        :func:`sample_hit_run`), a boolean array marking the
         tables whose diagonal had to be moved to be feasible, and the largest
         resulting change of an assortativity fraction.
     """
@@ -274,11 +275,45 @@ def _assortative_diagonal(
     return np.where(fixed, delta, np.nan), adjusted, eta_change
 
 
+# Default burn-in of each sampler: sweeps of R * C swap moves, or hit-and-run steps
+_DEFAULT_WARMUP = {"swap": 10, "hit_and_run": 1600}
+
+
+def _sample_tables(
+    key: jax.Array,
+    row_sums: NDArray,
+    col_sums: NDArray,
+    sampler: str,
+    num_warmup: Optional[int],
+    symmetric: bool = False,
+    diagonal: Optional[NDArray] = None,
+) -> jax.Array:
+    """
+    Draw one table per pair of margins with the chosen sampler.
+
+    Returns tables of shape ``(..., K, K)`` for margins of shape ``(..., K)``.
+    """
+    if num_warmup is None:
+        num_warmup = _DEFAULT_WARMUP[sampler]
+    if sampler == "swap":
+        tables = sample_swap(
+            key, row_sums, col_sums, num_samples=1, num_warmup_sweeps=num_warmup,
+            symmetric=symmetric, diagonal=diagonal,
+        )
+    else:
+        tables = sample_hit_run(
+            key, row_sums, col_sums, num_samples=1, num_warmup=num_warmup,
+            symmetric=symmetric, diagonal=diagonal,
+        )
+    return tables[..., 0, :, :]
+
+
 def sample_full_counts(
     z_marg: Dict[str, NDArray],
     key: jax.Array,
-    num_warmup: int = 1600,
+    num_warmup: Optional[int] = None,
     assortativity: Optional[Dict[str, ArrayLike]] = None,
+    sampler: Literal["swap", "hit_and_run"] = "swap",
 ) -> Dict[str, NDArray]:
     """
     Sample fully stratified expected contact counts from their margins.
@@ -289,7 +324,8 @@ def sample_full_counts(
     the partially stratified counts ``z^k_ab``, and by reciprocity its column
     sums are ``z^l_ba``.  Nothing else is known about the table, so it is
     drawn uniformly from all non-negative tables with these margins (the
-    transportation polytope) with the hit-and-run sampler.
+    transportation polytope), with swap moves (:func:`sample_swap`, the
+    default) or hit-and-run (:func:`sample_hit_run`).
 
     Reciprocity also requires ``X^{kl}_ab = X^{lk}_ba``.  Tables are therefore
     sampled for ``a > b`` only, and the ``(b, a)`` table is the transpose of
@@ -320,24 +356,40 @@ def sample_full_counts(
         counts of shape ``(S, A, A)`` (output of :func:`z_marginals`).
     key : jax.Array
         JAX PRNG key.
-    num_warmup : int, optional
-        Number of hit-and-run steps per table (default 1600).  See
-        :func:`sample_transportation_polytope` for how this default was
-        chosen.  For two strata a single step is an exact draw.
+    num_warmup : int or None, optional
+        Burn-in per table: sweeps of ``K * K`` moves for swap moves, steps for
+        hit-and-run.  If ``None`` (default), 10 sweeps or 1600 steps; see
+        :func:`sample_swap` and :func:`sample_hit_run` for how these were
+        chosen.  With two strata the tables are drawn exactly by either
+        sampler, and the burn-in is irrelevant.
     assortativity : Dict[str, ArrayLike] or None, optional
         Dictionary mapping stratum labels to assortativity fractions in
         ``[0, 1]``: a scalar (common to all age pairs), an ``(A, A)`` array
         indexed by respondent age and contact age, or an ``(S, A, A)`` array
         per posterior draw.  Only entries with respondent age ``a >= b`` are
-        used.  Strata that are left out are not constrained.  With two strata
-        at most one can be given.
+        used.  With ``sampler="swap"`` every stratum needs a fraction, since
+        the swap sampler fixes the whole diagonal.  With
+        ``sampler="hit_and_run"`` strata that are left out are not
+        constrained, and with two strata at most one can be given.
+    sampler : {"swap", "hit_and_run"}, optional
+        Sampler for the tables (default ``"swap"``).
 
     Returns
     -------
     Dict[str, NDArray]
         Dictionary mapping ``"source->target"`` stratum pairs to fully
         stratified contact counts of shape ``(S, A, A)``.
+
+    Raises
+    ------
+    ValueError
+        If ``sampler`` is not ``"swap"`` or ``"hit_and_run"``, or if the
+        assortativity fractions are invalid.
     """
+    if sampler not in _DEFAULT_WARMUP:
+        raise ValueError(
+            f"sampler must be one of {list(_DEFAULT_WARMUP)}, got {sampler!r}."
+        )
     strata = list(z_marg)
     Z = np.stack([z_marg[k] for k in strata], axis=1)  # (S, K, A, A)
     S, K, A, _ = Z.shape
@@ -364,6 +416,13 @@ def sample_full_counts(
     fixed_off = fixed_diag = None
     if assortativity:
         eta, fixed = _assortativity_array(assortativity, strata, (S, A, A))
+        if sampler == "swap" and not fixed.all():
+            missing = [k for k, f in zip(strata, fixed) if not f]
+            raise ValueError(
+                "The swap sampler fixes the whole diagonal, so every stratum "
+                f"needs an assortativity fraction; missing: {missing}. Give all "
+                "strata, or use sampler='hit_and_run' for a partly fixed diagonal."
+            )
         fixed_off, adjusted_off, change_off = _assortative_diagonal(
             np.moveaxis(eta[:, :, a, b], 1, -1), fixed, row_sums, col_sums
         )
@@ -384,23 +443,13 @@ def sample_full_counts(
                 stacklevel=2,
             )
 
-    X_off = sample_transportation_polytope(
-        key_off,
-        row_sums,
-        col_sums,
-        num_samples=1,
-        num_warmup=num_warmup,
-        diagonal=fixed_off,
-    )[..., 0, :, :]  # (S, n_pairs, K, K)
-    X_diag = sample_transportation_polytope(
-        key_diag,
-        margins_diag,
-        margins_diag,
-        num_samples=1,
-        num_warmup=num_warmup,
-        symmetric=True,
-        diagonal=fixed_diag,
-    )[..., 0, :, :]  # (S, A, K, K)
+    X_off = _sample_tables(
+        key_off, row_sums, col_sums, sampler, num_warmup, diagonal=fixed_off
+    )  # (S, n_pairs, K, K)
+    X_diag = _sample_tables(
+        key_diag, margins_diag, margins_diag, sampler, num_warmup,
+        symmetric=True, diagonal=fixed_diag,
+    )  # (S, A, K, K)
 
     # Assemble X[s, k, l, a, b]; the (b, a) table is the transpose of (a, b)
     X = np.zeros((S, K, K, A, A))

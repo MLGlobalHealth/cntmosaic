@@ -156,6 +156,20 @@ def diagonal_is_feasible(
     )
 
 
+def _mirror_upper(x: Array) -> Array:
+    """
+    Make ``x`` exactly symmetric by copying its upper triangle onto the lower one.
+
+    Works on the last two axes.  Inside a compiled chain the compiler may
+    still compute a cell and its mirror with different rounding, which keeps
+    tables symmetric only up to rounding there.  Applied to tables returned
+    from the compiled chain, it is a plain copy of stored values and makes
+    them exactly symmetric.
+    """
+    upper = jnp.triu(jnp.ones(x.shape[-2:], dtype=bool))
+    return jnp.where(upper, x, jnp.swapaxes(x, -1, -2))
+
+
 def _double_center(z: Array, mask: Array) -> Array:
     """
     Remove the row and column means of ``z`` over the cells in ``mask``.
@@ -266,9 +280,9 @@ def _step(
     x_new = x + jnp.where(jnp.isfinite(t), t, 0.0) * d
     if symmetric:
         # The compiled update may round a cell and its mirror differently; restore
-        # exact symmetry.  This keeps the margins, since the row and column sums
-        # are equal, and keeps every cell non-negative.
-        x_new = (x_new + x_new.T) / 2
+        # exact symmetry.  The table was symmetric up to rounding, so the margins
+        # change only by rounding error, and every cell stays non-negative.
+        x_new = _mirror_upper(x_new)  # symmetric up to rounding; exact on output
     if any(fixed):
         # Reset the fixed diagonal to prevent drift from rounding (section A.5.6).
         x_new = jnp.where(jnp.diag(jnp.array(fixed)), x, x_new)
@@ -280,7 +294,7 @@ def _quasi_independence(
     col_res: Array,
     free: Array,
     symmetric: bool,
-    max_sweeps: int = 1000,
+    max_sweeps: int = 10_000,
 ) -> Array:
     """
     Quasi-independence table on the free cells, by iterative proportional fitting.
@@ -288,7 +302,8 @@ def _quasi_independence(
     Returns the non-negative table with margins ``(row_res, col_res)``, zeros
     outside ``free`` and every free cell strictly positive (equation A.18).
     Fitting stops once every row sum is within rounding error of ``row_res``,
-    relative to that row sum.
+    relative to that row sum.  Near the boundary of the feasible diagonals
+    fitting converges slowly, hence the generous limit on the number of sweeps.
     """
     rtol = 100 * jnp.finfo(row_res.dtype).eps
 
@@ -306,7 +321,7 @@ def _quasi_independence(
     y, _ = jax.lax.while_loop(
         not_converged, sweep, sweep((free.astype(row_res.dtype), 0))
     )
-    return (y + y.T) / 2 if symmetric else y
+    return _mirror_upper((y + y.T) / 2) if symmetric else y
 
 
 def _start(
@@ -404,7 +419,7 @@ def _fixed_diagonal(r: Array, c: Array, diagonal: ArrayLike) -> Tuple[Array, tup
     return jnp.where(jnp.isnan(diagonal), 0.0, diagonal), fixed
 
 
-def sample_transportation_polytope(
+def sample_hit_run(
     key: Array,
     row_sums: ArrayLike,
     col_sums: ArrayLike,
@@ -490,7 +505,7 @@ def sample_transportation_polytope(
     Examples
     --------
     >>> import jax
-    >>> tables = sample_transportation_polytope(
+    >>> tables = sample_hit_run(
     ...     jax.random.key(0), [3.0, 1.0], [2.0, 2.0], num_samples=100
     ... )
     >>> tables.shape
@@ -520,4 +535,6 @@ def sample_transportation_polytope(
         symmetric=symmetric,
         fixed=fixed,
     )
-    return samples.reshape(*batch_shape, num_samples, R, C) * total[..., None, None]
+    samples = samples.reshape(*batch_shape, num_samples, R, C) * total[..., None, None]
+    # Exactly symmetric output (see _mirror_upper)
+    return _mirror_upper(samples) if symmetric else samples
