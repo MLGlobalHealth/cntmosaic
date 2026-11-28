@@ -91,10 +91,16 @@ def interval_score(
     y_high: NDArray,
     alpha: float,
 ) -> float:
-    """Compute the interval score for given true values and interval bounds.
+    r"""Mean interval score of central (1 - alpha) prediction intervals.
 
-    The interval score penalises both the width of the interval and violations
-    of coverage symmetrically on each side.
+    .. math::
+
+        IS_\alpha(l, u; y) = (u - l) + \frac{2}{\alpha}(l - y)_+
+                             + \frac{2}{\alpha}(y - u)_+
+
+    where :math:`(x)_+ = \max(0, x)` (Gneiting & Raftery, 2007, eq. 43). It is
+    the interval width plus a penalty, linear in the distance, for truths that
+    fall outside the interval.
 
     Parameters
     ----------
@@ -105,18 +111,21 @@ def interval_score(
     y_high : NDArray
         Upper bound of the prediction interval.
     alpha : float
-        Significance level used when constructing the interval.
+        Nominal miscoverage: the interval is the central (1 - alpha) interval.
 
     Returns
     -------
     float
-        Mean interval score (lower is better).
+        Mean interval score over all elements (lower is better).
     """
-    return np.mean(
-        (y_high - y_low)
-        + 2 / alpha * (y_low - y_true) * np.maximum(0, y_low - y_true)
-        + 2 / alpha * (y_high - y_true) * np.maximum(0, y_high - y_true)
+    validate_alpha(alpha)
+    y_true, y_low, y_high = (
+        np.asarray(x, dtype=float) for x in (y_true, y_low, y_high)
     )
+    width = y_high - y_low
+    below = np.maximum(0.0, y_low - y_true)
+    above = np.maximum(0.0, y_true - y_high)
+    return float(np.mean(width + 2.0 / alpha * (below + above)))
 
 
 def compute_metrics(
@@ -124,6 +133,7 @@ def compute_metrics(
     y_est: NDArray,
     y_low: NDArray,
     y_high: NDArray,
+    alpha: float = 0.05,
 ) -> tuple:
     """Compute RMSE, MAE, MAPE, interval score, and coverage.
 
@@ -137,17 +147,20 @@ def compute_metrics(
         Lower credible-interval bound.
     y_high : NDArray
         Upper credible-interval bound.
+    alpha : float, default=0.05
+        Nominal miscoverage of the interval ``[y_low, y_high]``, used by the
+        interval score.
 
     Returns
     -------
     tuple
         ``(rmse, mae, mape, int_score, coverage)`` where *mape* is in percent,
-        *int_score* uses ``alpha=0.05``, and *coverage* is in percent.
+        *int_score* uses ``alpha``, and *coverage* is in percent.
     """
     rmse = root_mean_squared_error(y_true, y_est)
     mae = mean_absolute_error(y_true, y_est)
     mape = mean_absolute_percentage_error(y_true, y_est) * 100
-    int_score = interval_score(y_true, y_low, y_high, alpha=0.05)
+    int_score = interval_score(y_true, y_low, y_high, alpha=alpha)
     coverage = np.mean((y_true >= y_low) & (y_true <= y_high)) * 100
     return rmse, mae, mape, int_score, coverage
 
@@ -155,6 +168,7 @@ def compute_metrics(
 def process_variable_metrics(
     data_eval: Dict[str, NDArray],
     data_est: Dict[str, NDArray],
+    alpha: float = 0.05,
 ) -> list:
     """Compute metrics for a single variable across its categories and overall.
 
@@ -164,6 +178,8 @@ def process_variable_metrics(
         Mapping from category key to ground-truth array.
     data_est : dict
         Mapping from category key to ``(lower, median, upper)`` triple of arrays.
+    alpha : float, default=0.05
+        Nominal miscoverage of the intervals, used by the interval score.
 
     Returns
     -------
@@ -173,7 +189,7 @@ def process_variable_metrics(
     metrics = []
     for key, values in data_est.items():
         rmse, mae, mape, int_score, coverage = compute_metrics(
-            data_eval[key], values[1], values[0], values[2]
+            data_eval[key], values[1], values[0], values[2], alpha=alpha
         )
         metrics.append(
             {
@@ -192,7 +208,9 @@ def process_variable_metrics(
     y_low = np.vstack([values[0] for values in data_est.values()])
     y_high = np.vstack([values[2] for values in data_est.values()])
 
-    rmse, mae, mape, int_score, coverage = compute_metrics(y_true, y_est, y_low, y_high)
+    rmse, mae, mape, int_score, coverage = compute_metrics(
+        y_true, y_est, y_low, y_high, alpha=alpha
+    )
 
     metrics.append(
         {
@@ -211,6 +229,7 @@ def process_variable_metrics(
 def aggregate_metrics(
     data_eval: Dict[str, NDArray],
     data_est: Dict[str, NDArray],
+    alpha: float = 0.05,
 ) -> pd.DataFrame:
     """Aggregate metrics for all variables/categories and compute overall metrics.
 
@@ -220,6 +239,8 @@ def aggregate_metrics(
         Mapping from category key to ground-truth array.
     data_est : dict
         Mapping from category key to ``(lower, median, upper)`` triple of arrays.
+    alpha : float, default=0.05
+        Nominal miscoverage of the intervals, used by the interval score.
 
     Returns
     -------
@@ -227,7 +248,7 @@ def aggregate_metrics(
         Per-category metric rows followed by an overall ``"all"`` row.
     """
     all_metrics = []
-    all_metrics.extend(process_variable_metrics(data_eval, data_est))
+    all_metrics.extend(process_variable_metrics(data_eval, data_est, alpha=alpha))
 
     # Compute overall metrics across all variables and categories
     y_true = np.vstack([data_eval[cat] for cat in data_est.keys()])
@@ -235,7 +256,9 @@ def aggregate_metrics(
     y_low = np.vstack([values[0] for values in data_est.values()])
     y_high = np.vstack([values[2] for values in data_est.values()])
 
-    rmse, mae, mape, int_score, coverage = compute_metrics(y_true, y_est, y_low, y_high)
+    rmse, mae, mape, int_score, coverage = compute_metrics(
+        y_true, y_est, y_low, y_high, alpha=alpha
+    )
     all_metrics.append(
         {
             "cat": "all",

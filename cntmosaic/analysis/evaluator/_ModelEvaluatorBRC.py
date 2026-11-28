@@ -124,7 +124,7 @@ class ModelEvaluatorBRC(BaseModelEvaluator):
                 cs = summary["All->All"]
                 y_true = self.cint_true["All->All"]
                 rmse, mae, mape, int_score, coverage = compute_metrics(
-                    y_true, cs.central, cs.lower, cs.upper
+                    y_true, cs.central, cs.lower, cs.upper, alpha=alpha
                 )
                 metrics_df = pd.DataFrame(
                     {
@@ -141,7 +141,7 @@ class ModelEvaluatorBRC(BaseModelEvaluator):
                 summary_dict = self.summariser.summarise_cint(alpha=alpha)
                 # Convert ContactSummary to (3, ...) arrays for aggregate_metrics
                 summary_arrays = {k: v.to_array() for k, v in summary_dict.items()}
-                metrics_df = aggregate_metrics(self.cint_true, summary_arrays)
+                metrics_df = aggregate_metrics(self.cint_true, summary_arrays, alpha=alpha)
 
             self._metrics_cache[cache_key] = metrics_df
 
@@ -192,7 +192,7 @@ class ModelEvaluatorBRC(BaseModelEvaluator):
                 cs = summary["All->All"]
                 y_true = self.mcint_true["All->All"]
                 rmse, mae, mape, int_score, coverage = compute_metrics(
-                    y_true, cs.central, cs.lower, cs.upper
+                    y_true, cs.central, cs.lower, cs.upper, alpha=alpha
                 )
                 metrics_df = pd.DataFrame(
                     {
@@ -208,7 +208,7 @@ class ModelEvaluatorBRC(BaseModelEvaluator):
             else:  # genmix
                 summary_dict = self.summariser.summarise_mcint(alpha=alpha)
                 summary_arrays = {k: v.to_array() for k, v in summary_dict.items()}
-                metrics_df = aggregate_metrics(self.mcint_true, summary_arrays)
+                metrics_df = aggregate_metrics(self.mcint_true, summary_arrays, alpha=alpha)
 
             self._metrics_cache[cache_key] = metrics_df
 

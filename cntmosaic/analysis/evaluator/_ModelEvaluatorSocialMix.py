@@ -259,7 +259,7 @@ class ModelEvaluatorSocialMix(BaseModelEvaluator):
                 y_high = summary["All->All"][2]  # upper bound
 
                 rmse, mae, mape, int_score, coverage = compute_metrics(
-                    y_true, y_est, y_low, y_high
+                    y_true, y_est, y_low, y_high, alpha=alpha
                 )
 
                 metrics_df = pd.DataFrame(
@@ -281,7 +281,7 @@ class ModelEvaluatorSocialMix(BaseModelEvaluator):
                 )
 
                 # summary_dict: {label: NDArray(3, A, A)}
-                metrics_df = aggregate_metrics(self.cint_true, summary_dict)
+                metrics_df = aggregate_metrics(self.cint_true, summary_dict, alpha=alpha)
 
             self._metrics_cache[cache_key] = metrics_df
 
@@ -339,7 +339,7 @@ class ModelEvaluatorSocialMix(BaseModelEvaluator):
                 y_high = summary["All->All"][2]  # upper bound
 
                 rmse, mae, mape, int_score, coverage = compute_metrics(
-                    y_true, y_est, y_low, y_high
+                    y_true, y_est, y_low, y_high, alpha=alpha
                 )
 
                 metrics_df = pd.DataFrame(
@@ -359,7 +359,7 @@ class ModelEvaluatorSocialMix(BaseModelEvaluator):
                 summary_dict = self.summariser.summarise_mcint(
                     alpha=alpha, return_depixilated=True
                 )
-                metrics_df = aggregate_metrics(self.mcint_true, summary_dict)
+                metrics_df = aggregate_metrics(self.mcint_true, summary_dict, alpha=alpha)
 
             self._metrics_cache[cache_key] = metrics_df
 
