@@ -273,7 +273,7 @@ class ContactSampler:
                 if part_labels == matrix_labels:
                     self.strat_column = col
                     self.strat_columns = [col]  # Single stratification
-                    self.strat_labels = list(matrix_labels)
+                    self.strat_labels = sorted(matrix_labels)
                     found_match = True
                     break
 
@@ -287,7 +287,7 @@ class ContactSampler:
                 if part_labels_combined == matrix_labels:
                     self.strat_column = "_".join(strat_cols)
                     self.strat_columns = strat_cols  # Multiple stratifications
-                    self.strat_labels = list(matrix_labels)
+                    self.strat_labels = sorted(matrix_labels)
                     # Add combined column to df_part for easier processing
                     self.df_part[self.strat_column] = combined_labels
                     found_match = True
@@ -330,7 +330,7 @@ class ContactSampler:
                 if part_labels == all_labels:
                     self.strat_column = col
                     self.strat_columns = [col]  # Single stratification
-                    self.strat_labels = list(all_labels)
+                    self.strat_labels = sorted(all_labels)
                     found_match = True
                     break
 
@@ -343,7 +343,7 @@ class ContactSampler:
                 if part_labels_combined == all_labels:
                     self.strat_column = "_".join(strat_cols)
                     self.strat_columns = strat_cols  # Multiple stratifications
-                    self.strat_labels = list(all_labels)
+                    self.strat_labels = sorted(all_labels)
                     self.df_part[self.strat_column] = combined_labels
                     found_match = True
 

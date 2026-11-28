@@ -111,3 +111,48 @@ def test_full(generate_full):
 
     # Check that contacts include both strata
     assert set(df_cnt["cnt_region"].unique()) == {"Urban", "Rural"}
+
+
+_HASHSEED_SCRIPT = """
+import hashlib
+import numpy as np
+from cntmosaic.datasets import load_template_patterns
+from cntmosaic.sim import (
+    ContactSampler, MatrixSampler, ParticipantSampler, Population, Stratification,
+)
+
+patterns = load_template_patterns("United_States", max_age=30)
+ref = np.linspace(500, 1500, patterns["household"].shape[0])
+strats = [
+    Stratification("sex", 2, ref, labels=["M", "F"], seed=1),
+    Stratification("edu", 3, ref, labels=["low", "mid", "high"], seed=2),
+]
+pop = Population(strats)
+df_part = ParticipantSampler(pop, n_part=300).sample(seed=0)
+cint = MatrixSampler(patterns).generate_full(pop, mean_intensity=10.0, seed=0)
+df_cnt = ContactSampler(df_part, cint, random_effects=True).sample(seed=0)
+df_cnt = df_cnt.sort_values(list(df_cnt.columns[:-1])).reset_index(drop=True)
+print(hashlib.sha256(df_cnt.to_csv(index=False).encode()).hexdigest())
+"""
+
+
+@pytest.mark.parametrize("hashseeds", [("0", "1"), ("2", "12345")])
+def test_full_reproducible_across_hash_seeds(hashseeds):
+    """The same seed gives the same contacts whatever PYTHONHASHSEED is.
+
+    The strata were once iterated in set order, so the random stream was
+    consumed in an order that depended on string hashing.
+    """
+    import os
+    import subprocess
+    import sys
+
+    digests = []
+    for hs in hashseeds:
+        env = {**os.environ, "PYTHONHASHSEED": hs}
+        out = subprocess.run(
+            [sys.executable, "-c", _HASHSEED_SCRIPT],
+            env=env, capture_output=True, text=True, check=True,
+        )
+        digests.append(out.stdout.strip())
+    assert digests[0] == digests[1]
