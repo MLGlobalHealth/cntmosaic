@@ -62,16 +62,16 @@ class PremNumPyroMixin:
             )
 
             if self.random_effects:
-                with plate("strata_re", self.K):
-                    mu_re = numpyro.sample("mu_re", dist.Normal(0.0, 1.0))
-                    tau_re = numpyro.sample("tau_re", dist.HalfNormal(1.0))
+                # Participant-level random effects, as in the unstratified
+                # model: one effect per participant, shared by all of their
+                # observations (which may span several stratum pairs), with
+                # common hyperparameters. (Hyperparameters per stratum pair
+                # were indexed per observation, not per participant, and are
+                # confounded with beta0 in any case.)
+                mu_re = numpyro.sample("mu_re", dist.Normal(0.0, 1.0))
+                tau_re = numpyro.sample("tau_re", dist.HalfNormal(1.0))
                 with plate("random_effects", self.N):
-                    sigma_re = numpyro.sample(
-                        "sigma_re",
-                        dist.Normal(
-                            mu_re[self.six[self.iix]], tau_re[self.six[self.iix]]
-                        ),
-                    )
+                    sigma_re = numpyro.sample("sigma_re", dist.Normal(mu_re, tau_re))
                 log_lambda = log_cint[self.six, self.cix, self.dix] + sigma_re[self.iix]
             else:
                 log_lambda = log_cint[self.six, self.cix, self.dix]

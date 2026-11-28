@@ -254,9 +254,9 @@ class ModelEvaluatorSocialMix(BaseModelEvaluator):
                 )
 
                 y_true = self.cint_true
-                y_est = summary["All->All"][1]  # median
-                y_low = summary["All->All"][0]  # lower bound
-                y_high = summary["All->All"][2]  # upper bound
+                y_est = summary["All->All"].central  # median
+                y_low = summary["All->All"].lower  # lower bound
+                y_high = summary["All->All"].upper  # upper bound
 
                 rmse, mae, mape, int_score, coverage = compute_metrics(
                     y_true, y_est, y_low, y_high, alpha=alpha
@@ -280,8 +280,9 @@ class ModelEvaluatorSocialMix(BaseModelEvaluator):
                     alpha=alpha, return_depixilated=True
                 )
 
-                # summary_dict: {label: NDArray(3, A, A)}
-                metrics_df = aggregate_metrics(self.cint_true, summary_dict, alpha=alpha)
+                # summary_dict: {label: ContactSummary}
+                summary_arrays = {k: v.to_array() for k, v in summary_dict.items()}
+                metrics_df = aggregate_metrics(self.cint_true, summary_arrays, alpha=alpha)
 
             self._metrics_cache[cache_key] = metrics_df
 
@@ -334,9 +335,9 @@ class ModelEvaluatorSocialMix(BaseModelEvaluator):
                     alpha=alpha, return_depixilated=True
                 )
                 y_true = self.mcint_true
-                y_est = summary["All->All"][1]  # median
-                y_low = summary["All->All"][0]  # lower bound
-                y_high = summary["All->All"][2]  # upper bound
+                y_est = summary["All->All"].central  # median
+                y_low = summary["All->All"].lower  # lower bound
+                y_high = summary["All->All"].upper  # upper bound
 
                 rmse, mae, mape, int_score, coverage = compute_metrics(
                     y_true, y_est, y_low, y_high, alpha=alpha
@@ -359,7 +360,8 @@ class ModelEvaluatorSocialMix(BaseModelEvaluator):
                 summary_dict = self.summariser.summarise_mcint(
                     alpha=alpha, return_depixilated=True
                 )
-                metrics_df = aggregate_metrics(self.mcint_true, summary_dict, alpha=alpha)
+                summary_arrays = {k: v.to_array() for k, v in summary_dict.items()}
+                metrics_df = aggregate_metrics(self.mcint_true, summary_arrays, alpha=alpha)
 
             self._metrics_cache[cache_key] = metrics_df
 

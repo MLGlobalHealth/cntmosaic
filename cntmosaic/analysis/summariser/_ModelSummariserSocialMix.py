@@ -230,13 +230,49 @@ class ModelSummariserSocialMix:
             quantiles[label] = np.quantile(samples, q=probs, axis=0)
         return quantiles
 
+    def _cint_samples(self, return_depixilated: bool) -> Dict[str, NDArray]:
+        """
+        Stacked bootstrap contact intensity samples, by stratum label.
+
+        With ``return_depixilated``, each sample is first projected from the
+        age groups to 1-year ages (weighted by the population age
+        distribution); quantiles must be taken afterwards, as depixilation and
+        quantiles do not commute.
+        """
+        stacked = self._stack_samples(self.sm._boot.cint_samples)
+        if not return_depixilated:
+            return stacked
+        if self.age_dist is None:
+            raise ValueError(
+                "Population data required for depixilation. "
+                "Provide pop_data when initializing SocialMix."
+            )
+        if "All->All" in stacked:
+            stacked["All->All"] = self._depixilate_unstratified(
+                stacked["All->All"], use_age_dist=True
+            )
+            return stacked
+        return self._depixilate_stratified(stacked, use_age_dist=True)
+
     def summarise_cint(
         self,
         alpha: float = 0.05,
+        return_depixilated: bool = False,
         force_recompute: bool = False,
     ) -> Dict[str, ContactSummary]:
         """
         Compute bootstrap confidence intervals for contact intensity.
+
+        Parameters
+        ----------
+        alpha : float, default=0.05
+            Significance level of the intervals.
+        return_depixilated : bool, default=False
+            Return the summaries at 1-year age resolution (each bootstrap
+            sample is depixilated before the quantiles are taken) instead of
+            in the model's age groups.
+        force_recompute : bool, default=False
+            Ignore the cache.
 
         Returns
         -------
@@ -246,11 +282,11 @@ class ModelSummariserSocialMix:
         validate_alpha(alpha)
         self._validate_bootstrap()
 
-        cache_key = f"cint_alpha{alpha}"
+        cache_key = f"cint_alpha{alpha}_depix{return_depixilated}"
         if not force_recompute and cache_key in self._cache:
             return self._cache[cache_key]
 
-        stacked = self._stack_samples(self.sm._boot.cint_samples)
+        stacked = self._cint_samples(return_depixilated)
         probs = _get_ci_probs(alpha)
         result = {}
         for label, arr in stacked.items():
@@ -261,7 +297,7 @@ class ModelSummariserSocialMix:
                 upper=q[2],
                 alpha=alpha,
                 measure="median",
-                age_group_specs=self.sm.age_group_specs,
+                age_group_specs=None if return_depixilated else self.sm.age_group_specs,
             )
         self._cache[cache_key] = result
         return result
@@ -305,6 +341,7 @@ class ModelSummariserSocialMix:
     def summarise_mcint(
         self,
         alpha: float = 0.05,
+        return_depixilated: bool = False,
         force_recompute: bool = False,
     ) -> Dict[str, ContactSummary]:
         """
@@ -321,11 +358,12 @@ class ModelSummariserSocialMix:
         validate_alpha(alpha)
         self._validate_bootstrap()
 
-        cache_key = f"mcint_alpha{alpha}"
+        cache_key = f"mcint_alpha{alpha}_depix{return_depixilated}"
         if not force_recompute and cache_key in self._cache:
             return self._cache[cache_key]
 
-        stacked = self._stack_samples(self.sm._boot.cint_samples)
+        # Depixilate the full matrices first, then take marginals and quantiles
+        stacked = self._cint_samples(return_depixilated)
         probs = _get_ci_probs(alpha)
         result = {}
         for label, arr in stacked.items():
@@ -337,7 +375,7 @@ class ModelSummariserSocialMix:
                 upper=q[2],
                 alpha=alpha,
                 measure="median",
-                age_group_specs=self.sm.age_group_specs,
+                age_group_specs=None if return_depixilated else self.sm.age_group_specs,
             )
         self._cache[cache_key] = result
         return result
